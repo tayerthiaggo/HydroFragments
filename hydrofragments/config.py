@@ -114,17 +114,34 @@ class RiverscapeConfig:
     # docs/superpowers/specs/2026-09-14-riverscape-phase0-findings.md,
     # "Basin-scale rerun" section): bare_threshold_floor_pct is a
     # degraded-path *fallback* used only when per-run calibration (spec
-    # §4.2 step 4) cannot run, not the primary threshold and not a
-    # min-clamp on the calibrated value. Measured seed-water bs_pc_50
-    # medians were 31.5 (narrow AOI) and 7.5 (basin-wide) -- both well
-    # under the Plan 1 placeholder of 50.0, and the basin-wide value is
-    # itself an aggregate over highly heterogeneous landscapes (coastal
-    # mudflats to arid interior), so it is not a safe single fallback
-    # either. 30.0 sits near the higher (narrow-AOI) end of the observed
-    # range: low enough to be plausible in the AOIs measured so far, but
-    # not pinned to the basin-wide aggregate's low outlier, which the
-    # findings doc flags as needing further per-reach study before it
-    # could be trusted as a fallback on its own.
+    # §4.2 step 4) cannot run -- not the primary threshold and not a
+    # min-clamp on the calibrated value. The evidence bit's semantic (spec
+    # §4.2, bit B: "bare percentile >= bare_threshold") is "barer than
+    # local background", so this floor must be anchored to a background
+    # baseline, not to a seed-water figure taken in isolation.
+    #
+    # The narrow-AOI seed-water figure (31.5) is NOT a safe anchor: the
+    # findings doc's own basin-wide rerun shows the narrow AOI's reaches
+    # "sit almost exactly at the top 1% of basin reaches by upstream
+    # drainage area, confirming it sampled only the largest (near-outlet)
+    # reaches, not a representative cross-section." Worse, the sign of
+    # the seed-vs-background contrast flips between the two AOIs: in the
+    # narrow AOI, seed-water bs_pc_50 (31.5) is HIGHER than AOI-wide
+    # background (20.5) -- seed is barer than background, as intended --
+    # but basin-wide, seed-water bs_pc_50 (7.5) is LOWER than AOI-wide
+    # background (24.5) -- seed is LESS bare than background, the
+    # opposite relationship. These two figures cannot be averaged or
+    # range-picked between; they disagree in sign, not just magnitude.
+    # Resolving that disagreement needs per-reach calibration, which this
+    # fallback floor does not attempt -- it is left open for Plan 3 (see
+    # the findings doc's "Implications for Plan 3" bullet on
+    # bare_threshold calibration).
+    #
+    # Anchor: the basin-wide AOI-wide background median, 24.5 (the more
+    # representative baseline per the findings doc's own assessment).
+    # 30.0 is set just above that median, on the barer-than-typical side
+    # of the background baseline, without relying on either AOI's
+    # seed-water figure.
     bare_threshold_floor_pct: float = 30.0
     bare_year_fraction: float = 0.6
     trough_radius_m: float = 150.0
@@ -772,6 +789,45 @@ class HydroConfig:
         )
         if riverscape.min_channel_confidence < 1:
             raise ConfigError("riverscape.min_channel_confidence must be at least 1")
+        if riverscape.rem_k < 1:
+            raise ConfigError(
+                f"riverscape.rem_k must be a positive integer, got {riverscape.rem_k}"
+            )
+        if riverscape.envelope_min_bin_pixels < 1:
+            raise ConfigError(
+                "riverscape.envelope_min_bin_pixels must be a positive integer, "
+                f"got {riverscape.envelope_min_bin_pixels}"
+            )
+        if riverscape.narrow_width_px < 1:
+            raise ConfigError(
+                "riverscape.narrow_width_px must be a positive integer, "
+                f"got {riverscape.narrow_width_px}"
+            )
+        if not (
+            math.isfinite(riverscape.trough_radius_m)
+            and riverscape.trough_radius_m > 0
+        ):
+            raise ConfigError("riverscape.trough_radius_m must be finite and positive")
+        if not (
+            math.isfinite(riverscape.profile_bin_m) and riverscape.profile_bin_m > 0
+        ):
+            raise ConfigError("riverscape.profile_bin_m must be finite and positive")
+        if not (
+            math.isfinite(riverscape.rem_max_distance_m)
+            and riverscape.rem_max_distance_m > 0
+        ):
+            raise ConfigError(
+                "riverscape.rem_max_distance_m must be finite and positive"
+            )
+        if not (math.isfinite(riverscape.h_chan_m) and riverscape.h_chan_m > 0):
+            raise ConfigError("riverscape.h_chan_m must be finite and positive")
+        if not (
+            math.isfinite(riverscape.width_growth_factor)
+            and riverscape.width_growth_factor > 0
+        ):
+            raise ConfigError(
+                "riverscape.width_growth_factor must be finite and positive"
+            )
 
         temporal_raw = _section(
             source,

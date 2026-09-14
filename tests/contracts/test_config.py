@@ -397,3 +397,28 @@ def test_unknown_riverscape_key_is_rejected() -> None:
 
     with pytest.raises(ConfigError, match=r"unknown config key.*riverscape\.mystery"):
         HydroConfig.from_mapping(minimal_config(riverscape={"mystery": True}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rem_k", -1),
+        ("envelope_min_bin_pixels", -1),
+        ("narrow_width_px", -1),
+        ("trough_radius_m", -150.0),
+        ("profile_bin_m", -300.0),
+        ("rem_max_distance_m", -5000.0),
+        ("h_chan_m", -2.0),
+        ("width_growth_factor", -3.0),
+        ("trough_radius_m", float("nan")),
+        ("profile_bin_m", float("inf")),
+        ("rem_max_distance_m", float("nan")),
+    ],
+)
+def test_riverscape_config_rejects_non_positive_or_non_finite_numerics(
+    field: str, value: float
+) -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match=f"riverscape.{field}"):
+        HydroConfig.from_mapping(minimal_config(riverscape={field: value}))
