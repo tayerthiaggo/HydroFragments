@@ -18,7 +18,21 @@
 | dem_s | 1.0 | 270.0 / 818.84 | 234.31 / 807.77 |
 | dem_h | 1.0 | 30.0 / 450.0 | 0.0 / 276.59 |
 
-**Decision:** default `dem_band = dem_h`.
+**Caveat — finite fraction is not a valid nodata check in this run:** every
+band above reports `finite fraction = 1.0`. This is a script artifact, not
+evidence that the AOI is fully populated: the spike casts each band to float
+via `np.asarray(data, dtype=float)` without ever introducing a NaN nodata
+value (DEM bands may carry a float nodata sentinel rather than NaN), so
+`np.isfinite(...).mean()` is structurally incapable of returning anything but
+1.0 regardless of actual nodata coverage. Any evidence loader written for
+Plan 2 must load with an explicit NaN nodata path (e.g.
+`odc.stac.load(..., dtype="float32")` plus masking against the declared
+nodata value) rather than trusting `np.isfinite` on a raw cast.
+
+**Decision:** the literal rule's mechanical output is `dem_band = dem_h`
+(kept below, and in the table above, for audit purposes). **The corrected,
+adopted default is `dem_band = dem_s`** — see the override below.
+
 Rule applied: choose the band with the lower skeleton→trough p50. If the two
 p50 values differ by 30 m or less, choose `dem_s`, because `dem_h` troughs are
 stream-burned at AHGF line positions (record both line→trough p50 values as
@@ -35,13 +49,25 @@ bias pattern the tie-break clause exists to catch, but the large p50 gap
 means it isn't caught here, so Plan 2 should not treat `dem_h`'s channel
 geometry as independent evidence of channel position — see below.
 
+**Override (task-review finding, plan-level):** the literal rule gates on the
+skeleton→trough p50 gap (≤30 m), which is the wrong signal here — the direct
+signal, `dem_h`'s line→trough p50, is available and decisive: it is exactly
+0.0 m, i.e. at or below one pixel (30 m), which is direct proof that `dem_h`'s
+trough sits on the rasterized AHGF line rather than on independent terrain.
+The corrected default for this AOI is therefore `dem_band = dem_s`, overriding
+the literal rule's `dem_h` output. **Corrected general rule for Plan 2:** gate
+directly on `line_to_trough.p50_m` for `dem_h` — if it is at or below one
+pixel (30 m), treat `dem_h` as stream-burned and choose `dem_s` regardless of
+the skeleton→trough gap.
+
 ## Fractional Cover percentiles (`ga_ls_fc_pc_cyear_3`)
 - STAC URL / items: `https://explorer.sandbox.dea.ga.gov.au/stac` / `2`
 - Percentile bands present: `bs_pc_10`, `bs_pc_50`, `bs_pc_90`, `npv_pc_10`, `npv_pc_50`, `npv_pc_90`, `pv_pc_10`, `pv_pc_50`, `pv_pc_90`
 - Grid equal: `true`
-- Band medians (seed water / trough / AOI), from `fc.band_stats`:
+- Band medians (seed water / trough / `dem_s` trough / AOI), from
+  `fc.band_stats`:
 
-| Band | finite fraction | median on seed water | median on trough | median AOI |
+| Band | finite fraction | median on seed water | median on `dem_s` trough | median AOI |
 |---|---|---|---|---|
 | bs_pc_10 | 1.0 | 21.5 | 12.5 | 12.0 |
 | bs_pc_50 | 1.0 | 31.5 | 23.0 | 20.5 |
@@ -52,6 +78,29 @@ geometry as independent evidence of channel position — see below.
 | pv_pc_10 | 1.0 | 18.5 | 14.5 | 18.0 |
 | pv_pc_50 | 1.0 | 23.5 | 21.5 | 25.0 |
 | pv_pc_90 | 1.0 | 35.0 | 39.5 | 44.5 |
+
+Footnote: the "median on `dem_s` trough" column was computed using `dem_s`'s
+trough mask, hardcoded in the spike script, regardless of which DEM band is
+ultimately selected as `dem_band`. Since the corrected decision above adopts
+`dem_s` as the default, this column is now consistent with the selected band
+— but the label is explicit here so a reader does not have to infer which
+band's trough it refers to.
+
+**Caveat — finite fraction is not a valid nodata check in this run:** as with
+the DEM table above, every band here reports `finite fraction = 1.0` purely
+because Fractional Cover percentile bands are uint8 with a 255 nodata
+sentinel and the spike casts them to float via `np.asarray(data,
+dtype=float)` without ever introducing a NaN — so `np.isfinite(...).mean()`
+can never be anything but 1.0 in this run, regardless of actual nodata
+coverage. Plan 2's evidence loaders must mask against the declared nodata
+value (255 for these bands) and produce real NaNs before computing any
+finite-fraction diagnostic.
+
+**Time aggregation caveat:** the Fractional Cover STAC search returned
+exactly 2 items (`fc.item_count = 2`, above), and the spike's `_band_array`
+helper takes `.median("time")` over whatever items were returned — so every
+median reported in the table above is really the mean of 2 yearly composite
+values (which is why they all end in `.0` or `.5`).
 
 - Chosen names: `bare_band = bs_pc_50`,
   `green_band = pv_pc_50`,
@@ -66,8 +115,22 @@ STAC item's assets — no fallback to a "closest present" name was needed.)
 - Columns: `area_m2`, `dt_created`, `dt_satpass`, `dt_updated`, `dt_wetobs`, `geometry`, `id`, `meta_url`, `perimetr_m`, `timeseries`, `uid`, `wet_sa_m2`
 
 ## AHGF alignment
-- line→EO skeleton (lines within 1 km): p50 108.17 m, p95 630.71 m, n 15883
-- Implied corridor seed: `p95 + max half-width`, clamped to 90–600 m
+- line→EO skeleton (lines within ~1 km, 990 m / 33 px): p50 108.17 m, p95
+  630.71 m, n 15883
+- Retention / all-lines context: `ahgf_offset.line_to_skeleton_all` (all AHGF
+  line pixels, not restricted to the ~1 km search radius) has p50 174.93 m,
+  p95 3461.58 m, n 19455 — versus n 15883 within ~1 km. That means roughly
+  81.6% of AHGF line pixels have EO water within ~1 km (15883/19455), and
+  18.4% do not, with a tail out past 3.4 km. This is material context for
+  Plan 2's corridor design: a meaningful minority of the network has no
+  nearby EO water signal at all.
+- Corridor seed: the template formula `p95 + max half-width`, clamped to
+  90–600 m, is now evaluated against the measured p95 above (630.71 m).
+  630.71 m already exceeds the 600 m upper clamp before adding any channel
+  half-width term, so for this AOI the corridor seed is unconditionally
+  600 m (the clamp ceiling) regardless of per-reach half-width. The 600 m
+  ceiling appears too tight for this catchment's measured AHGF/EO offset and
+  should be reconsidered when Plan 2 sets `corridor_max_m`.
 - `UpstrDArea` 5/50/95 %: 671305.95 / 53181024764.69 / 54159056415.92 m²
 
 ## Implications for Plan 2
