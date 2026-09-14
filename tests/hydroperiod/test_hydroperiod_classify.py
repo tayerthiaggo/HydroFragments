@@ -144,7 +144,7 @@ def test_matches_build_zones_classes_on_the_same_domain() -> None:
 
 def test_hydroperiod_package_never_imports_riverscape() -> None:
     offenders: list[str] = []
-    for path in sorted(HYDROPERIOD_PACKAGE.glob("*.py")):
+    for path in sorted(HYDROPERIOD_PACKAGE.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("hydrofragments.riverscape"):
