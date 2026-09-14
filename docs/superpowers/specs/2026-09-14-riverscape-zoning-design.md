@@ -477,6 +477,69 @@ widths are consistency checks.
 - Channel extension beyond the last observed segment (dangling ends) and full
   network completion for reaches with no observed water — rejected for now;
   flagged in provenance.
+
+## 12. Carried into Plan 2 (Plan 1 final-review findings)
+
+Plan 1's whole-branch review (commit `e1e4cf8`, all 5 tasks approved) raised
+five findings that are correct but out of Plan 1's scope. One (the import-
+cycle guard) was fixed immediately as a small, isolated addition
+(`c9e3bf0`). The rest are recorded here so Plan 2 does not have to
+re-derive them:
+
+- **`emitted_zones`/`has_zone_1` semantics differ by mode.** In occurrence
+  mode (`build_zones`) these fields are *derived* from what the mask
+  actually contains (e.g. `(2,3,4)`/`False` with no drainage). In riverscape
+  mode (`combine_zones`) they are currently *hardcoded* to `(1,2,3,4)`/`True`
+  regardless of the mask's actual content — a degraded `auto` run with zero
+  in-channel pixels would still advertise Zone 1. This was Task 4's literal,
+  tested contract (`tests/spatial/test_zone_combination.py`), so changing it
+  now would break an already-approved test; it is a decision for whoever
+  writes `zones_from_riverscape` (§7, `output/finalize.py`,
+  `output/manifest.py` are the consumers that would observe either choice).
+  **Decision needed:** derive both fields from the mask in riverscape mode
+  too (matching occurrence mode's philosophy), or keep them mode-declared
+  and document why the two modes mean different things.
+- **The Fitzroy Phase 0 AOI is ~542 km² of lower mainstem, not the
+  catchment**, and its `UpstrDArea` distribution is consequently degenerate
+  (p50 ≈ p95 ≈ 53,000–54,000 km² across 291 reaches — nearly every reach in
+  the window is mainstem). §4.2 step 7's per-log-A-bin envelope fit will
+  very likely fall into the `<2 usable bins → b=0, degraded` branch on this
+  AOI. Plan 2 should either widen the Phase 0 AOI before calibrating the
+  envelope, or treat the degraded-fit path as the expected case for this
+  test catchment and validate it deliberately rather than by accident.
+- **`bare_threshold_pct` (default 50, §6) is not supported by the Phase 0
+  FC medians.** `bs_pc_50` on the EO water seed is 31.5, on the `dem_s`
+  trough 23.0, AOI-wide 20.5 — a ~10 pp lift over background, well under 50.
+  B evidence (§4.2 step 4) needs either a lower default threshold or a
+  per-run calibrated one (mirroring the envelope's own per-run calibration
+  in §4.2 step 7) before it can contribute meaningfully to channel rules.
+  The Phase 0 FC sample is also only two annual composites
+  (`2022-01-01/2023-12-31`); `bare_year_fraction = 0.6` (§6) needs more
+  years than Phase 0 measured to be checked at all.
+- **No test exercises the full call chain** `WoStatistics → wet_domain →
+  classify_hydroperiod → combine_zones` — the exact sequence
+  `analyze_from_dea` will use — including the bridged case where the
+  landform extent is `domain ∪ bridges` and `combine_zones`'s
+  extent-agreement check (§3.1, §3.4) is load-bearing. Plan 2's first task
+  should add one synthetic end-to-end test on a small grid (dask-backed
+  stats, an `unobserved_mask` disjoint from the domain, a hand-built
+  landform array) before wiring in real loaders.
+- **A riverscape `ZoneResult` is not yet exportable**: `combine_zones`
+  leaves `grid=None`, and `ZoneResult.as_dataarray()` only serializes
+  `mask`, never `crosstab`. Expected at this stage (§7 assigns grid
+  attachment and crosstab export to `zones_from_riverscape` / Plan 4), noted
+  here only so it isn't mistaken for an oversight when Plan 2 starts
+  building the loaders that feed it.
+
+Minor items worth folding into whichever Plan 2 task next touches the
+relevant file (not worth a standalone task): `combine_zones`'s
+`degraded_reasons` parameter accepts a bare `str` and silently iterates it
+into single-character tuple entries — reject non-tuple/list input
+explicitly; `ZoneResult.__post_init__` allows `mode="occurrence"` with a
+non-`None` `crosstab` (the reverse case is correctly rejected) — reject
+that combination too; `HydroperiodResult` has no `__post_init__`
+validation, unlike `ZoneResult`, an asymmetry worth resolving if the two
+types are meant to be handled uniformly.
 - Split of in-channel by hydroperiod into separate legacy zones — available
   through the cross-tab instead.
 
