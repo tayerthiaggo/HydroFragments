@@ -174,6 +174,7 @@ asserted and a mismatch raises.
 | water | DEA Waterbodies v3 polygons | S evidence, off-channel objects |
 | bare | DEA Fractional Cover percentiles `ga_ls_fc_pc_cyear_3` (bare-soil percentile band) | B evidence: persistently bare channel bed |
 | riparian | same FC percentiles product, photosynthetic-vegetation percentile band | V evidence: persistent dry-season green corridor; bridge cost and gap-cause label only |
+| riparian (optional) | same FC percentiles product, non-photosynthetic-vegetation percentile band | bridge cost only (weight 0 by default) |
 | terrain | SRTM 1 s `ga_srtm_dem1sv1_0`, band `dem_s` or `dem_h` (Phase 0 decides) | REM, trough, slope |
 | topology | AHGF drainage lines | reach IDs, downstream order, `UpstrDArea`, search corridor |
 
@@ -252,7 +253,10 @@ Rules:
      upstream anchor endpoint to the downstream anchor endpoint. Cost per pixel
      (all terms configurable weights, lower = more channel-like): relative
      elevation / trough depth (T), inverse WOfS frequency where `freq > 0`,
-     bare (B), riparian green (V), and distance to the AHGF line. Pixels above
+     bare (B), riparian green (V), optional non-photosynthetic vegetation
+     (dry litter / dead wood in channel beds, FC `npv` percentile; weight 0
+     unless the Fitzroy calibration shows benefit), and distance to the AHGF
+     line. Pixels above
      `bridge_rem_max_m` are impassable.
    - **Width.** Half-width linearly interpolated along the path between the
      anchor segments' distance-transform half-widths at their endpoints;
@@ -359,7 +363,7 @@ added to `_TOP_LEVEL_KEYS` and `scientific_config`;
 | `envelope_quantile`, `envelope_h_max_m`, `envelope_min_bin_pixels`, `slope_max_deg` | 0.95, 15, 200, 2.0 |
 | `min_channel_confidence`, `include_line_fallback_in_channel` | 2, False |
 | `bridge_enabled`, `bridge_max_length_m`, `bridge_max_cost_per_m`, `bridge_rem_max_m` | True, 2000, set in Phase 3 calibration, 5.0 |
-| `bridge_cost_weights` (terrain, water, bare, green, line_distance) | 1.0, 1.0, 0.5, 1.0, 0.5 |
+| `bridge_cost_weights` (terrain, water, bare, green, npv, line_distance) | 1.0, 1.0, 0.5, 1.0, 0.0, 0.5 |
 | `riparian_green_pct`, `narrow_width_px` | 40, 2 |
 
 Validation: fractions in `[0, 1]`; `f_seed <= f_chan_high`; distances
@@ -453,8 +457,8 @@ widths are consistency checks.
 | # | Phase | Acceptance |
 |---|---|---|
 | 0 | This spec; data-access spike on Fitzroy | DEM bands/CRS, FC bands, DEA Waterbodies route confirmed; AHGF offset measured; `dem_s` vs `dem_h` decided; aligned layers pass grid equality |
-| 1 | Config, `wet_domain`, `classify_hydroperiod`, `combine_zones` | config round-trip and hash bump; domain, boundary, mapping and import-boundary tests |
-| 2 | Loaders, corridor, centreline, REM | offset, anabranch and pit tests |
+| 1 | `wet_domain`, `classify_hydroperiod`, `combine_zones` | domain, boundary, mapping and import-boundary tests |
+| 2 | `RiverscapeConfig`, loaders, corridor, centreline, REM | config round-trip and hash bump; offset, anabranch and pit tests |
 | 3 | Channel rules, waterbodies, gap bridging | sand-bed, billabong, scald, family tests; vegetated/narrow/dangling/unbridged/no-overwrite bridge tests; Fitzroy bridge-cost calibration recorded |
 | 4 | Riverine vs non-riverine | dam, billabong, single-bin tests |
 | 5 | Workflow, exports, manifest | integration tests in all modes; gating test extended |
