@@ -70,7 +70,7 @@ Flat, low-gradient catchments must work.
 
 ### 3.1 Analysis domain
 
-Both layers operate only on **observed-wet pixels** of the DEA WO statistics:
+The analysis is anchored on **observed-wet pixels** of the DEA WO statistics:
 
 ```
 domain = (count_wet > 0) & isfinite(frequency) & (count_clear >= min_valid_obs)
@@ -80,11 +80,20 @@ This is the native 30 m wet domain `build_zones` already uses. It is **not**
 hydroseason's coarsened planning footprint / `analysis_mask`, which
 `hydroseason/_io_dea_stats.py:655-661` forbids feeding into zoning.
 
-Pixels outside the domain are `0` in every output layer.
+One controlled exception: **channel gap bridges** (Section 4.2 step 5). A river
+channel is continuous, but WOfS breaks it where water sits under riparian
+canopy, where the channel is narrower than a Landsat pixel can resolve, or
+where water is spectrally unusual. Bridges may place in-channel pixels outside
+the domain, but **only between two observed channel segments on the same AHGF
+reach path** — both ends are anchored by EO. No channel is invented upstream of
+the last observed segment or on reaches with no observed water.
 
-**Accepted limitation.** Channel beds never imaged wet, and extreme floods
-Landsat missed (cloud at peak, water under canopy — Lymburner et al. 2024),
-are not zoned. A channel pixel wet in even one clear observation is in scope.
+Everything else outside the domain is `0` in every output layer.
+
+**Accepted limitation.** Reaches with no observed water at all, dangling
+channel ends beyond the last observed segment, and off-channel extreme floods
+Landsat missed (cloud at peak, water under canopy — Lymburner et al. 2024) are
+not zoned. Unbridged reaches are counted and flagged in provenance.
 
 ### 3.2 Layer 1 — landform (`hydrofragments/riverscape/`)
 
@@ -93,12 +102,14 @@ Answers *where*. Within the domain:
 | Code | Class | Meaning |
 |---|---|---|
 | 0 | outside | not in domain |
-| 1 | `in_channel` | part of the river channel, regardless of wetness |
+| 1 | `in_channel` | part of the river channel, regardless of wetness — observed or bridged |
 | 2 | `off_channel_riverine` | floodplain / off-channel water inside the valley bottom |
 | 3 | `non_riverine` | water outside the valley bottom (farm dams, isolated lakes) |
 
-Built from fused evidence (Section 4). Knows nothing about hydroperiod
-classes.
+A companion `channel_source` raster records how each in-channel pixel was
+obtained: `1 observed` (evidence rules on domain pixels), `2 bridged` (gap
+bridge). Built from fused evidence (Section 4). Knows nothing about
+hydroperiod classes.
 
 ### 3.3 Layer 2 — hydroperiod (`hydrofragments/hydroperiod/`)
 
@@ -111,9 +122,14 @@ Answers *how often wet*. Within the domain, using `config.zones.t_persist` and
 | 1 | `persistent` | `freq > 100·t_persist` |
 | 2 | `seasonal` | `100·t_season <= freq <= 100·t_persist` |
 | 3 | `marginal` | `freq < 100·t_season` (and `> 0` by domain) |
+| 4 | `unobserved` | outside the domain but supplied as a landform-1 pixel (bridged channel) |
 
 Boundaries match `build_zones` exactly (both inclusive for seasonal).
-Pure function; must not import `hydrofragments.riverscape`. Future
+The classifier computes codes 1–3 from frequency on the domain only; code 4 is
+never inferred from neighbours — the pixel was not observed wet, and the layer
+says so. The classifier accepts an optional `unobserved_mask` for code 4 and
+otherwise never reads landform. Pure function; must not import
+`hydrofragments.riverscape`. Future
 classifiers (DEA WO seasonal summaries `ga_ls_wo_fq_nov_mar_3` /
 `ga_ls_wo_fq_apr_oct_3`, hydroseason `end_dry` snapshots) replace this layer
 without touching Layer 1.
@@ -124,12 +140,13 @@ without touching Layer 1.
 
 - **Cross-tab** `zone_crosstab = landform*10 + hydroperiod`
   (e.g. `11` in-channel persistent = refuge pool; `13` in-channel marginal =
-  rarely-wet channel; `21` off-channel persistent = billabong).
+  rarely-wet channel; `14` in-channel unobserved = bridged gap under canopy or
+  sub-pixel channel; `21` off-channel persistent = billabong).
 - **Legacy four-zone view:**
 
 | Legacy zone | Rule | Export name |
 |---|---|---|
-| 1 | landform 1, any hydroperiod | `in_channel` |
+| 1 | landform 1, any hydroperiod (incl. unobserved bridges) | `in_channel` |
 | 2 | landform 2 & hydroperiod 1 | `persistent_off_channel` |
 | 3 | landform 2 & hydroperiod 2 | `seasonal_floodplain` |
 | 4 | landform 2 & hydroperiod 3 | `marginal_floodplain` |
@@ -156,6 +173,7 @@ asserted and a mismatch raises.
 | water | DEA WO statistics `ga_ls_wo_fq_myear_3` | seeds, W evidence |
 | water | DEA Waterbodies v3 polygons | S evidence, off-channel objects |
 | bare | DEA Fractional Cover percentiles `ga_ls_fc_pc_cyear_3` (bare-soil percentile band) | B evidence: persistently bare channel bed |
+| riparian | same FC percentiles product, photosynthetic-vegetation percentile band | V evidence: persistent dry-season green corridor; bridge cost and gap-cause label only |
 | terrain | SRTM 1 s `ga_srtm_dem1sv1_0`, band `dem_s` or `dem_h` (Phase 0 decides) | REM, trough, slope |
 | topology | AHGF drainage lines | reach IDs, downstream order, `UpstrDArea`, search corridor |
 
@@ -184,9 +202,10 @@ Rules:
    `clamp(p95 + max_half_width, corridor_min_m, corridor_max_m)`, pooled per
    run and recorded in provenance. The corridor is a search space only.
 2. **Centreline (conflation).** Skeleton (`medial_axis`) of the water seed
-   inside the corridor; gaps bridged along trough/bare pixels in the
-   corridor; last resort the AHGF line, flagged `line_fallback`. Skeletons
-   with loops flag the reach `multithread`.
+   inside the corridor. Gaps in the skeleton are left open here and resolved
+   by gap bridging (step 5); where a reach has no seed at all, the AHGF line
+   is used only as a topology/profile guide, flagged `line_fallback`, and never
+   becomes channel. Skeletons with loops flag the reach `multithread`.
 3. **Terrain (Relative Elevation Model).** Chosen over D8 HAND because flow
    routing on 1 s SRTM fails in flat terrain.
    - Sample the `profile_percentile` (p10) elevation per `profile_bin_m`
@@ -217,11 +236,42 @@ Rules:
    in-channel when confidence `>= min_channel_confidence` (default 2).
    Line-fallback-only support gets confidence 1 and is not in-channel by
    default.
-5. **DEA Waterbodies roles.** Merge fragments cut at tile edges; classify
+5. **Channel gap bridging (landform 1, `channel_source = bridged`).** Follows
+   established practice for reconnecting fragmented river masks: least-cost
+   path search over terrain and water evidence (Wang et al. 2024; Chen et al.
+   2020), overlaying EO masks with DEM-derived networks to close gaps (Yi et
+   al. 2025), DEM-derived streams for sub-pixel rivers (Wortmann et al. 2025),
+   and DEM-guided growth of water under vegetation from observed seeds (Rossi
+   et al. 2025).
+   - **Candidates.** For every AHGF reach path, order the observed channel
+     segments along flow. A gap is the space between the downstream end of one
+     observed segment and the upstream end of the next on the same path
+     (including across a reach junction). Gaps with only one anchor are never
+     bridged.
+   - **Path.** `skimage.graph.MCP_Geometric` inside the corridor, from the
+     upstream anchor endpoint to the downstream anchor endpoint. Cost per pixel
+     (all terms configurable weights, lower = more channel-like): relative
+     elevation / trough depth (T), inverse WOfS frequency where `freq > 0`,
+     bare (B), riparian green (V), and distance to the AHGF line. Pixels above
+     `bridge_rem_max_m` are impassable.
+   - **Width.** Half-width linearly interpolated along the path between the
+     anchor segments' distance-transform half-widths at their endpoints;
+     painted by disc along the path, clipped to the corridor, never overwriting
+     observed channel or landform 2/3 domain pixels with stronger evidence.
+   - **Limits.** Bridge length `<= bridge_max_length_m`; path cost per metre
+     `<= bridge_max_cost_per_m`; otherwise the gap stays open and is flagged
+     `gap_unbridged` with its reason.
+   - **Diagnostics (per bridge, exported as a `channel_bridges` vector layer).**
+     `reach_id`, length, mean cost, anchor widths, `bridge_confidence` (1 low /
+     2 medium, decreasing with length and cost), and `gap_cause`:
+     `vegetated` (median V along path `>= riparian_green_pct`), `narrow`
+     (both anchor widths `<= narrow_width_px` pixels), else `unobserved`.
+   - Bridged pixels get hydroperiod `unobserved` (code 4).
+6. **DEA Waterbodies roles.** Merge fragments cut at tile edges; classify
    each polygon `riverine` or `off_channel` by centreline overlap and
    elongation. Riverine polygons supply S; off-channel polygons give object
    consistency to landform 2.
-6. **Riverine vs non-riverine (landform 2 vs 3).** For domain pixels not in
+7. **Riverine vs non-riverine (landform 2 vs 3).** For domain pixels not in
    the channel: riverine when `REM <= h_fp(A)` and `slope <= slope_max_deg`,
    else non-riverine.
    - `A` = AHGF `UpstrDArea` (m²) of the nearest reach.
@@ -234,7 +284,7 @@ Rules:
      low-gradient basins (Annis et al. 2021).
    - MrVBF (Gallant & Dowling 2003) is added only if the Fitzroy check shows
      hillslope dams leaking into landform 2.
-7. **Scale.** Windowed per sub-catchment group with overlap
+8. **Scale.** Windowed per sub-catchment group with overlap
    `>= corridor + rem_max_distance_m`, stitched by core ownership.
    `_build_reach_label_raster` (`connectivity_context.py:96-108`) is
    vectorised.
@@ -257,7 +307,8 @@ recorded in `ZoneResult.degraded_reasons` and the manifest.
 ## 5. Code layout and interfaces
 
 - `hydrofragments/io/riverscape_sources.py` — `load_dem(geobox, *, product,
-  band)`, `load_fc_bare(geobox, *, product, band, years)`,
+  band)`, `load_fc_percentiles(geobox, *, product, bands, years)` (bare and
+  photosynthetic-vegetation bands),
   `load_waterbodies(bounds, crs, *, source)`, `RiverscapeSourceUnavailable`.
   This is a deliberate exception to "hydroseason owns STAC access";
   boundary docstrings in `io/dea.py:1-16` and `workflow.py:1-10` are updated,
@@ -268,12 +319,16 @@ recorded in `ZoneResult.degraded_reasons` and the manifest.
   - `evidence.py` — `RiverscapeEvidence` (frozen)
   - `corridor.py`, `centreline.py`, `terrain.py`, `waterbodies.py`,
     `channel.py`, `riverine.py`, `windows.py`
+  - `bridging.py` — `find_gaps(channel, centreline, drainage) -> list[Gap]`,
+    `bridge_gaps(gaps, cost_inputs, cfg) -> BridgeResult` (bridged mask,
+    `channel_bridges` GeoDataFrame, unbridged gaps with reasons)
   - `pipeline.py` — `build_landform(evidence, domain, cfg) -> LandformResult`
-    (`landform`, `channel_confidence`, `rule_id`, `rem`, `grid`,
-    `provenance`, `degraded_reasons`)
+    (`landform`, `channel_source`, `channel_confidence`, `rule_id`, `rem`,
+    `bridges`, `grid`, `provenance`, `degraded_reasons`)
 - `hydrofragments/hydroperiod/classify.py` —
-  `classify_hydroperiod(frequency, domain, *, t_persist, t_season) ->
-  HydroperiodResult` (`classes`, `method="wofs_multiyear"`, thresholds).
+  `classify_hydroperiod(frequency, domain, *, t_persist, t_season,
+  unobserved_mask=None) -> HydroperiodResult` (`classes`,
+  `method="wofs_multiyear"`, thresholds).
 - `hydrofragments/spatial/zones.py` — `build_zones` unchanged; new
   `combine_zones(landform, hydroperiod) -> ZoneResult` and
   `zones_from_riverscape(stats, landform, *, config)`. `ZoneResult` gains
@@ -293,7 +348,7 @@ added to `_TOP_LEVEL_KEYS` and `scientific_config`;
 |---|---|
 | `mode` | `auto` |
 | `dem_product` / `dem_band` | `ga_srtm_dem1sv1_0` / set by Phase 0 |
-| `fc_product` / `bare_band` | `ga_ls_fc_pc_cyear_3` / confirmed in Phase 0 |
+| `fc_product` / `bare_band` / `green_band` | `ga_ls_fc_pc_cyear_3` / confirmed in Phase 0 |
 | `waterbodies_source` | `None` (Phase 0 picks WFS bbox or national file) |
 | `f_seed`, `f_chan_high` | 0.05, 0.10 |
 | `bare_threshold_pct`, `bare_year_fraction` | 50, 0.6 |
@@ -303,9 +358,12 @@ added to `_TOP_LEVEL_KEYS` and `scientific_config`;
 | `profile_bin_m`, `profile_percentile`, `rem_k`, `rem_max_distance_m` | 300, 10, 8, 5000 |
 | `envelope_quantile`, `envelope_h_max_m`, `envelope_min_bin_pixels`, `slope_max_deg` | 0.95, 15, 200, 2.0 |
 | `min_channel_confidence`, `include_line_fallback_in_channel` | 2, False |
+| `bridge_enabled`, `bridge_max_length_m`, `bridge_max_cost_per_m`, `bridge_rem_max_m` | True, 2000, set in Phase 3 calibration, 5.0 |
+| `bridge_cost_weights` (terrain, water, bare, green, line_distance) | 1.0, 1.0, 0.5, 1.0, 0.5 |
+| `riparian_green_pct`, `narrow_width_px` | 40, 2 |
 
 Validation: fractions in `[0, 1]`; `f_seed <= f_chan_high`; distances
-positive and finite; `corridor_min_m < corridor_max_m`; percentile in
+positive and finite; cost weights non-negative with at least one positive; `corridor_min_m < corridor_max_m`; percentile in
 `(0, 100)`; quantile in `(0, 1)`; `auto`/`required` need a DEM source.
 
 All defaults are provisional until the Phase 7 validation report; each
@@ -322,14 +380,16 @@ change after validation must cite the report.
 - **`output/manifest.py`** — `zoning` section: `mode`, domain pixel count and
   digest, `degraded_reasons`, `ruleset_version`, sources (product, band,
   item ids), alignment estimate, envelope calibration, rule counts,
-  non-riverine area.
+  non-riverine area, bridged length and area by `gap_cause`, unbridged gap
+  count by reason, reaches with no observed water.
 - **`output/finalize.py`** — zone names keyed by mode (riverscape names in
   3.4; occurrence keeps current names because meanings differ); zones GPKG
   gains `mode`, `landform`, `hydroperiod` columns. Update
   `docs/spatial_exports.md:179`.
 - **`output/rasters.py`** + new spatial product `riverscape_evidence`:
-  `landform`, `hydroperiod`, `zone_crosstab` (uint8), `channel_confidence`
-  (uint8, 255 nodata), `rem` (float32, m).
+  `landform`, `hydroperiod`, `zone_crosstab`, `channel_source` (uint8),
+  `channel_confidence` (uint8, 255 nodata), `rem` (float32, m); vector layer
+  `channel_bridges` (LineString path + attributes from Section 4.2 step 5).
 - **`guards/scientific.py`** — unchanged; persistence metrics by zone remain
   refused (landform 1 still uses water evidence).
 - Zones still never split metrics; the gating test is extended to riverscape
@@ -351,6 +411,18 @@ Synthetic fixtures (`tests/fixtures/riverscape_synthetic.py`):
 - Single drainage-area bin → `b = 0` and degraded flag.
 - Misaligned evidence grids raise.
 - W + S count as one family.
+- Channel broken by a 300 m vegetated gap (never wet, high green, trough
+  present) between two observed segments → bridged, `gap_cause=vegetated`,
+  width interpolated, hydroperiod `unobserved`, legacy Zone 1.
+- Sub-pixel reach (anchor widths 1 px) → bridged, `gap_cause=narrow`.
+- Dangling end (observed segment with no downstream observed anchor) → not
+  extended; reach with no observed water → no channel, flagged.
+- Gap longer than `bridge_max_length_m` or path over an impassable ridge →
+  `gap_unbridged` with reason; no pixels painted.
+- Bridge never overwrites observed off-channel domain pixels (a billabong
+  beside the gap stays landform 2).
+- Hydroperiod code 4 only via `unobserved_mask`; never inferred from
+  frequency or neighbours.
 - Domain excludes `count_wet == 0` and low support and never reads the
   planning footprint.
 - Hydroperiod boundaries 9.9 / 10 / 50 / 50.1; cross-tab ↔ legacy mapping
@@ -383,7 +455,7 @@ widths are consistency checks.
 | 0 | This spec; data-access spike on Fitzroy | DEM bands/CRS, FC bands, DEA Waterbodies route confirmed; AHGF offset measured; `dem_s` vs `dem_h` decided; aligned layers pass grid equality |
 | 1 | Config, `wet_domain`, `classify_hydroperiod`, `combine_zones` | config round-trip and hash bump; domain, boundary, mapping and import-boundary tests |
 | 2 | Loaders, corridor, centreline, REM | offset, anabranch and pit tests |
-| 3 | Channel rules, waterbodies | sand-bed, billabong, scald, family tests |
+| 3 | Channel rules, waterbodies, gap bridging | sand-bed, billabong, scald, family tests; vegetated/narrow/dangling/unbridged/no-overwrite bridge tests; Fitzroy bridge-cost calibration recorded |
 | 4 | Riverine vs non-riverine | dam, billabong, single-bin tests |
 | 5 | Workflow, exports, manifest | integration tests in all modes; gating test extended |
 | 6 | Windowed execution | full Fitzroy within memory budget; no seam errors |
@@ -396,8 +468,11 @@ widths are consistency checks.
 - Seasonal hydroperiod (DEA WO Nov–Mar / Apr–Oct summaries) and hydroseason
   `end_dry` low-water snapshots — Layer 2 only.
 - MrVBF — only if hillslope leakage is observed.
-- Under-canopy inundation (Lymburner et al. 2024) and never-observed
-  floodplain — outside the observed-wet domain by decision.
+- Under-canopy off-channel inundation (Lymburner et al. 2024) and
+  never-observed floodplain — outside the observed-wet domain by decision.
+- Channel extension beyond the last observed segment (dangling ends) and full
+  network completion for reaches with no observed water — rejected for now;
+  flagged in provenance.
 - Split of in-channel by hydroperiod into separate legacy zones — available
   through the cross-tab instead.
 
@@ -407,6 +482,7 @@ widths are consistency checks.
 
 - Annis, A. et al. (2021). On the influence of river basin morphology and climate on hydrogeomorphic floodplain delineations. *Advances in Water Resources*. https://doi.org/10.1016/j.advwatres.2021.104078
 - Bozzolan, E. et al. (2026). Enhancing active channel delineation in alluvial rivers using monthly aggregation of Sentinel-2 imagery. *Earth and Space Science*. https://doi.org/10.1029/2025ea004642
+- Chen, H. et al. (2020). Extraction of connected river networks from multi-temporal remote sensing imagery using a path tracking technique. *Remote Sensing of Environment*. https://doi.org/10.1016/j.rse.2020.111868
 - Chen, Q. et al. (2024). Extracting an accurate river network: Stream burning re-revisited. *Remote Sensing of Environment*. https://doi.org/10.1016/j.rse.2024.114333
 - Crivellaro, M. et al. (2024). Characterization of active riverbed spatiotemporal dynamics through the definition of a framework for remote sensing procedures. *Remote Sensing*, 16(1), 184. https://doi.org/10.3390/rs16010184
 - Gallant, J. C., & Dowling, T. I. (2003). A multiresolution index of valley bottom flatness for mapping depositional areas. *Water Resources Research*. https://doi.org/10.1029/2002wr001426
@@ -416,6 +492,10 @@ widths are consistency checks.
 - Lymburner, L. et al. (2024). Seeing the floods through the trees: Using adaptive shortwave infrared thresholds to map inundation under wooded wetlands. *Hydrological Processes*. https://doi.org/10.1002/hyp.15174
 - Mueller, N. et al. (2016). Water observations from space: Mapping surface water from 25 years of Landsat imagery across Australia. *Remote Sensing of Environment*. https://doi.org/10.1016/j.rse.2015.11.003
 - Nardi, F. et al. (2019). GFPLAIN250m, a global high-resolution dataset of Earth's floodplains. *Scientific Data*. https://doi.org/10.1038/sdata.2018.309
+- Rossi, M. et al. (2025). Enhancing inundation mapping with geomorphological segmentation: Filling in gaps in spectral observations. *Science of the Total Environment*. https://doi.org/10.1016/j.scitotenv.2025.180180
 - Semeniuk, C. A., & Semeniuk, V. (1995). A geomorphic approach to global classification for inland wetlands. *Vegetatio*. https://doi.org/10.1007/bf00045193
 - Wang, Z. et al. (2021). Basin-scale high-resolution extraction of drainage networks using 10-m Sentinel-2 imagery. *Remote Sensing of Environment*. https://doi.org/10.1016/j.rse.2020.112281
+- Wang, N. et al. (2024). Delineation of intermittent rivers and ephemeral streams using a hybrid method. *Remote Sensing*, 16(13), 2489. https://doi.org/10.3390/rs16132489
+- Wortmann, M. et al. (2025). Global River Topology (GRIT): A bifurcating river hydrography. *Water Resources Research*. https://doi.org/10.1029/2024wr038308
+- Yi, X. et al. (2025). A hydrogeomorphology-informed method for mapping continuous river networks from satellite imagery. *GIScience & Remote Sensing*. https://doi.org/10.1080/15481603.2025.2529620
 - Zheng, K. et al. (2024). SHIFT: a spatial-heterogeneity improvement in DEM-based mapping of global geomorphic floodplains. *Earth System Science Data*. https://doi.org/10.5194/essd-16-3873-2024
