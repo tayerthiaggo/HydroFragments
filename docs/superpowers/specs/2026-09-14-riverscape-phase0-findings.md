@@ -171,3 +171,115 @@ STAC item's assets — no fallback to a "closest present" name was needed.)
 ## Plan 1 completion
 - Full suite: 894 passed, 1 failed (tests/release/test_branding.py::test_tracked_text_uses_only_readme_lineage_mention) — both known pre-existing failure categories in this repo are unrelated to this plan: the one that fired this run, tests/release/test_branding.py::test_tracked_text_uses_only_readme_lineage_mention (deterministic, pre-existing since commit 6bd26c6, failing because docs/superpowers/plans/2026-07-20-user-ready-implementation.md — last touched at 8a70e74 — mentions a retired package name), and a second category that did not fire this run but is also pre-existing and accepted: an intermittent Windows bundle-rename race (`PermissionError: [WinError 5] Access is denied`) in `hydrofragments/output/bundle.py::commit_staged_bundle`, documented in `docs/superpowers/plans/2026-08-12-dynamics-and-spatial-exports.md`.
 - Commit: 37e3095
+
+## Basin-scale rerun (Plan 2, Task 3)
+
+**Source JSON:** `output/spikes/riverscape_phase0_basin.json` (not committed)
+**Script:** `scripts/spikes/riverscape_phase0_basin_spike.py`
+**AOI:** `data/fitzroy_basin_aoi.geojson` (full Fitzroy River basin, ~97,200 km²), replacing the narrow AOI for distributional (not band/route) decisions.
+
+This does not re-decide `dem_band`, FC band names, or the DEA Waterbodies
+route — those came from the narrow-AOI Phase 0 spike above and don't depend
+on AOI size. It re-measures the distributions that were degenerate there.
+
+**Nodata-masking bug found and fixed during this task (not in the original
+brief text):** the first two runs of this script (matching the brief's
+script verbatim, plus the required PROJ env fix — see "Run cost" below)
+completed with `errors: {}` but produced degenerate numbers: `dem.trough_pixels
+= 0` basin-wide, and every FC band's `median_on_seed_water` read exactly
+`255.0` (FC's uint8 nodata sentinel) for all three bands. Root-caused via a
+standalone diagnostic against the same AOI/geobox:
+- FC bands declare `nodata=255`. 83.9% of this basin's 12,426,644 seed-water
+  pixels are FC-nodata (Fractional Cover has no land-cover estimate over
+  persistent water), so an unmasked `nanmedian` over the water mask returned
+  the sentinel itself, not a cover fraction. Masking only *after*
+  `.median("time")` would still be wrong: a pixel with a mix of
+  valid/nodata observations across time already has its per-pixel temporal
+  median pulled toward 255 (observed on-water max of 176.5 on a ~0-100
+  band) unless nodata is masked to NaN *before* the time reduction.
+- The DEM's declared nodata is `-3.4028234663852886e+38` (STAC
+  `raster:bands[0].nodata`, confirmed via the item's own metadata) — a
+  large-magnitude finite float, not NaN, so `np.isfinite()` alone does not
+  catch it (finite fraction read 99.87%, i.e. misleadingly "clean"). Left
+  unmasked, these cells fed `ndimage.uniform_filter`'s box-average and blew
+  up `local_mean` to NaN across virtually the whole raster, so
+  `depth >= TROUGH_DEPTH_M` was never true.
+
+Both are the exact gap this doc's DEM/FC caveats above already flagged for
+Plan 2 loaders ("must mask against the declared nodata value ... rather
+than trusting `np.isfinite` on a raw cast") — at basin scale it stopped
+being cosmetic and actively corrupted the trough/on-water statistics. Fixed
+in `scripts/spikes/riverscape_phase0_basin_spike.py`'s `_band_array` by
+masking each band's declared `nodata` attribute to NaN before any time
+reduction; the numbers below are from the corrected rerun (`errors: {}`,
+`dem.finite_fraction = 0.9987`, `dem.trough_pixels = 43,074,902`).
+
+### Grid
+- Shape / pixel count: `[12813, 16033]` / `205,430,829`
+
+### AHGF alignment (basin-wide)
+- line→EO skeleton (within ~1 km): p50 364.97 m, p95 924.18 m, n 407,211
+- `UpstrDArea` quantiles (m²): p1 278,736.85, p5 558,117.67, p25
+  1,698,952.54, p50 5,248,549.48, p75 33,181,307.65, p95 3,064,075,197.49,
+  p99 53,593,517,641.37
+- Reach count: 31,318
+
+**Comparison with the narrow AOI:** the narrow AOI's `UpstrDArea` p50≈p95
+(≈53,000–54,000 km²) is now the basin's **p99** (53,593.52 km² vs the
+narrow AOI's 53,181.02–54,159.06 km²) — the narrow AOI's entire observed
+range sits almost exactly at the top 1% of basin reaches by upstream
+drainage area, confirming it sampled only the largest (near-outlet)
+reaches, not a representative cross-section. The envelope fit (spec §4.2
+step 7) now has real per-log-A bins to fit against, spanning roughly five
+orders of magnitude (p1 ≈ 0.28 km² to p99 ≈ 53,594 km²).
+
+### Fractional Cover medians (basin-wide, `dem_s` trough)
+| Band | median on seed water | median on trough | median AOI |
+|---|---|---|---|
+| bs_pc_50 | 7.5 | 22.0 | 24.5 |
+| pv_pc_50 | 4.5 | 21.5 | 20.5 |
+| npv_pc_50 | 76.0 | 50.5 | 49.0 |
+
+**Comparison with the narrow AOI:** narrow-AOI `bs_pc_50` was 31.5 (seed) /
+20.5 (AOI) — the basin-wide **AOI** median (24.5) is broadly similar (within
+~20%), but the basin-wide **seed-water** median (7.5) is materially
+different, more than 4x lower than the narrow AOI's 31.5. This is itself
+evidence *for* the per-run-calibration decision in §4.2 step 4 rather than a
+fixed threshold: the ~97,200 km² basin spans landscapes (coastal mudflats
+through arid interior reaches) far more heterogeneous than the narrow AOI's
+single river stretch, so a bare-cover value calibrated on one AOI does not
+transfer to another. Whether *per-reach* (not just per-run) calibration is
+also needed can't be assessed from this script, which only reports
+basin-wide aggregate medians, not a per-reach breakdown — that would need a
+follow-up binned by reach or region.
+
+### Run cost
+- Wall-clock time: 721.6 s (~12.0 minutes)
+- Peak memory: 18,659,270,656 bytes (~17.4 GiB / 18.7 GB) (method: PowerShell
+  polling `Get-Process -Id <pid> | Select WorkingSet64` every 15 s for the
+  process lifetime, tracking the running maximum — Windows equivalent of
+  `resource.getrusage(...).ru_maxrss`). This exceeds the brief's own
+  ~800 MB–1.2 GB per-step estimate by roughly 15x: the nodata-masking fix
+  (`values.where(values != nodata)`) builds xarray-level intermediate
+  copies beyond the raw float32 path the original design assumed. It
+  stayed well within this machine's headroom throughout (system had
+  66.9 GB total / ≥28.6 GB free at every observed peak; no swapping, no OS
+  kill), so it did not warrant a BLOCKED report, but a memory-conscious
+  follow-up should mask nodata via plain `numpy.where` on the already-cast
+  float32 array rather than through xarray's `.where`.
+- FC-band computation approach used: one-band-at-a-time eager
+  materialization (as designed), with nodata masked to NaN via xarray
+  `.where()` before each band's `.median("time", skipna=True)` reduction.
+
+### Implications for Plan 3
+- `corridor_min_m`/`corridor_max_m` (spec §6, currently 90/600): the
+  basin-wide line→skeleton p95 (924.18 m) still saturates — and now exceeds
+  by more, not less — the 600 m ceiling the narrow AOI's 630.71 m already
+  saturated. The 600 m ceiling remains too tight for this catchment's
+  measured AHGF/EO offset at basin scale.
+- `bare_threshold` calibration inputs: basin-wide bare-cover medians differ
+  materially from the narrow AOI's (seed-water 7.5 vs 31.5), which supports
+  per-run calibration (not a value hardcoded from the narrow-AOI spike) as
+  the minimum needed; this script's basin-wide aggregates can't rule out
+  needing finer per-reach calibration too, since they average over the
+  whole basin's heterogeneous landscape rather than resolving it spatially.
