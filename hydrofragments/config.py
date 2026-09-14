@@ -121,10 +121,11 @@ class RiverscapeConfig:
     # baseline, not to a seed-water figure taken in isolation.
     #
     # The narrow-AOI seed-water figure (31.5) is NOT a safe anchor: the
-    # findings doc's own basin-wide rerun shows the narrow AOI's reaches
-    # "sit almost exactly at the top 1% of basin reaches by upstream
-    # drainage area, confirming it sampled only the largest (near-outlet)
-    # reaches, not a representative cross-section." Worse, the sign of
+    # findings doc's own basin-wide rerun shows the narrow AOI's entire
+    # observed UpstrDArea range "sits almost exactly at the top 1% of basin
+    # reaches by upstream drainage area, confirming it sampled only the
+    # largest (near-outlet) reaches, not a representative cross-section."
+    # Worse, the sign of
     # the seed-vs-background contrast flips between the two AOIs: in the
     # narrow AOI, seed-water bs_pc_50 (31.5) is HIGHER than AOI-wide
     # background (20.5) -- seed is barer than background, as intended --
@@ -823,10 +824,60 @@ class HydroConfig:
             raise ConfigError("riverscape.h_chan_m must be finite and positive")
         if not (
             math.isfinite(riverscape.width_growth_factor)
-            and riverscape.width_growth_factor > 0
+            # Growth is capped per reach at width_growth_factor x the reach's
+            # median seed half-width (spec Sec 4.3 "Growth"); a factor below
+            # 1.0 would cap the corridor narrower than the seed itself, which
+            # is degenerate, so 1.0 (no growth) is the floor, not 0.
+            and riverscape.width_growth_factor >= 1.0
         ):
             raise ConfigError(
-                "riverscape.width_growth_factor must be finite and positive"
+                "riverscape.width_growth_factor must be finite and at least 1.0"
+            )
+        if not (
+            math.isfinite(riverscape.trough_depth_m)
+            and riverscape.trough_depth_m > 0
+        ):
+            raise ConfigError("riverscape.trough_depth_m must be finite and positive")
+        if not (
+            math.isfinite(riverscape.envelope_h_max_m)
+            and riverscape.envelope_h_max_m > 0
+        ):
+            raise ConfigError(
+                "riverscape.envelope_h_max_m must be finite and positive"
+            )
+        if not (
+            math.isfinite(riverscape.bridge_max_length_m)
+            and riverscape.bridge_max_length_m > 0
+        ):
+            raise ConfigError(
+                "riverscape.bridge_max_length_m must be finite and positive"
+            )
+        if not (
+            math.isfinite(riverscape.bridge_rem_max_m)
+            and riverscape.bridge_rem_max_m > 0
+        ):
+            raise ConfigError(
+                "riverscape.bridge_rem_max_m must be finite and positive"
+            )
+        if not (
+            math.isfinite(riverscape.slope_max_deg)
+            # 90 deg is a vertical slope (rise/run -> infinity); no finite
+            # terrain gradient reaches it, so the open interval (0, 90) is a
+            # meaningful bound for a REM slope-angle threshold in degrees.
+            and 0.0 < riverscape.slope_max_deg < 90.0
+        ):
+            raise ConfigError(
+                "riverscape.slope_max_deg must be finite and between 0 and 90 degrees"
+            )
+        if not (
+            math.isfinite(riverscape.bridge_max_cost_per_m)
+            # bridge_enabled is already the explicit on/off switch for
+            # bridging, so 0 is not overloaded as a second "off" meaning:
+            # when used, the cost cap must be a real, strictly positive cost.
+            and riverscape.bridge_max_cost_per_m > 0
+        ):
+            raise ConfigError(
+                "riverscape.bridge_max_cost_per_m must be finite and positive"
             )
 
         temporal_raw = _section(

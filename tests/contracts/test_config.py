@@ -413,6 +413,27 @@ def test_unknown_riverscape_key_is_rejected() -> None:
         ("trough_radius_m", float("nan")),
         ("profile_bin_m", float("inf")),
         ("rem_max_distance_m", float("nan")),
+        # 0 boundary: zero is rejected, not treated as a valid minimum.
+        ("rem_k", 0),
+        ("trough_radius_m", 0.0),
+        # Fields newly guarded in this round.
+        ("trough_depth_m", -0.5),
+        ("trough_depth_m", float("nan")),
+        ("envelope_h_max_m", -15.0),
+        ("envelope_h_max_m", float("nan")),
+        ("bridge_max_length_m", -2000.0),
+        ("bridge_max_length_m", float("inf")),
+        ("bridge_rem_max_m", -5.0),
+        ("bridge_rem_max_m", float("-inf")),
+        ("slope_max_deg", -1.0),
+        ("slope_max_deg", 0.0),
+        ("slope_max_deg", 90.0),
+        ("bridge_max_cost_per_m", -2.0),
+        ("bridge_max_cost_per_m", 0.0),
+        # width_growth_factor's bound was tightened from > 0 to >= 1.0: a
+        # factor between 0 and 1 would cap the corridor narrower than the
+        # seed itself, which is degenerate.
+        ("width_growth_factor", 0.5),
     ],
 )
 def test_riverscape_config_rejects_non_positive_or_non_finite_numerics(
