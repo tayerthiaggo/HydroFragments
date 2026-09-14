@@ -22,9 +22,11 @@
 band above reports `finite fraction = 1.0`. This is a script artifact, not
 evidence that the AOI is fully populated: the spike casts each band to float
 via `np.asarray(data, dtype=float)` without ever introducing a NaN nodata
-value (DEM bands may carry a float nodata sentinel rather than NaN), so
-`np.isfinite(...).mean()` is structurally incapable of returning anything but
-1.0 regardless of actual nodata coverage. Any evidence loader written for
+value (DEM bands may carry a float nodata sentinel rather than NaN), so this
+column cannot be relied on as a nodata check in this run — whether it would
+ever show < 1.0 depends on whether `dem_s`/`dem_h`'s actual nodata sentinel
+is NaN or some other float value, which was not verified here. Any evidence
+loader written for
 Plan 2 must load with an explicit NaN nodata path (e.g.
 `odc.stac.load(..., dtype="float32")` plus masking against the declared
 nodata value) rather than trusting `np.isfinite` on a raw cast.
@@ -88,8 +90,10 @@ band's trough it refers to.
 
 **Caveat — finite fraction is not a valid nodata check in this run:** as with
 the DEM table above, every band here reports `finite fraction = 1.0` purely
-because Fractional Cover percentile bands are uint8 with a 255 nodata
-sentinel and the spike casts them to float via `np.asarray(data,
+because Fractional Cover percentile bands are documented as uint8 with a 255
+nodata sentinel (per the DEA FC product spec — not independently verified
+against this run's raw values) and the spike casts them to float via
+`np.asarray(data,
 dtype=float)` without ever introducing a NaN — so `np.isfinite(...).mean()`
 can never be anything but 1.0 in this run, regardless of actual nodata
 coverage. Plan 2's evidence loaders must mask against the declared nodata
@@ -120,8 +124,10 @@ STAC item's assets — no fallback to a "closest present" name was needed.)
 - Retention / all-lines context: `ahgf_offset.line_to_skeleton_all` (all AHGF
   line pixels, not restricted to the ~1 km search radius) has p50 174.93 m,
   p95 3461.58 m, n 19455 — versus n 15883 within ~1 km. That means roughly
-  81.6% of AHGF line pixels have EO water within ~1 km (15883/19455), and
-  18.4% do not, with a tail out past 3.4 km. This is material context for
+  81.6% of AHGF line pixels have an EO water skeleton within ~1 km
+  (15883/19455) — an upper bound on the fraction with no nearby water at
+  all, since a water pixel itself can sit off its own medial-axis skeleton —
+  and 18.4% do not, with a tail out past 3.4 km. This is material context for
   Plan 2's corridor design: a meaningful minority of the network has no
   nearby EO water signal at all.
 - Corridor seed: the template formula `p95 + max half-width`, clamped to
@@ -138,7 +144,9 @@ STAC item's assets — no fallback to a "closest present" name was needed.)
   trough coincides almost exactly with the rasterized AHGF line). The
   decision rule's tie-break protection against this bias only triggers when
   the skeleton→trough p50 gap is ≤30 m; here the gap is 240 m, so the literal
-  rule still selects `dem_h`. Plan 2 should treat `dem_h`'s apparent channel
+  rule still selects `dem_h` **— overridden above: the adopted default for
+  this AOI is `dem_band = dem_s`** (see the Override in the DEM section).
+  Plan 2 should treat `dem_h`'s apparent channel
   position as AHGF-line-conditioned, not as independent terrain evidence,
   when combining it with the AHGF-offset analysis below — e.g. do not use
   `dem_h` trough position as an independent cross-check on AHGF line
