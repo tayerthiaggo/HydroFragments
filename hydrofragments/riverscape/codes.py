@@ -1,0 +1,32 @@
+"""Landform layer code contract (spec 2026-09-14, section 3.2)."""
+
+from __future__ import annotations
+
+LANDFORM_OUTSIDE = 0
+LANDFORM_IN_CHANNEL = 1
+LANDFORM_OFF_CHANNEL_RIVERINE = 2
+LANDFORM_NON_RIVERINE = 3
+
+LANDFORM_CODES = frozenset(
+    {
+        LANDFORM_OUTSIDE,
+        LANDFORM_IN_CHANNEL,
+        LANDFORM_OFF_CHANNEL_RIVERINE,
+        LANDFORM_NON_RIVERINE,
+    }
+)
+
+LANDFORM_NAMES = {
+    LANDFORM_IN_CHANNEL: "in_channel",
+    LANDFORM_OFF_CHANNEL_RIVERINE: "off_channel_riverine",
+    LANDFORM_NON_RIVERINE: "non_riverine",
+}
+
+__all__ = [
+    "LANDFORM_CODES",
+    "LANDFORM_IN_CHANNEL",
+    "LANDFORM_NAMES",
+    "LANDFORM_NON_RIVERINE",
+    "LANDFORM_OFF_CHANNEL_RIVERINE",
+    "LANDFORM_OUTSIDE",
+]
