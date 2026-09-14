@@ -1,4 +1,4 @@
-"""Static occurrence-derived zones with optional real drainage Zone 1."""
+"""Zone masks: occurrence-only zoning and landform x hydroperiod combination."""
 
 from __future__ import annotations
 
@@ -11,10 +11,26 @@ from scipy import ndimage
 
 import rioxarray  # noqa: F401 — registers the .rio accessor for DataArray
 
+from hydrofragments.hydroperiod.codes import (
+    HYDROPERIOD_CODES,
+    HYDROPERIOD_MARGINAL,
+    HYDROPERIOD_OUTSIDE,
+    HYDROPERIOD_PERSISTENT,
+    HYDROPERIOD_SEASONAL,
+    HYDROPERIOD_UNOBSERVED,
+)
 from hydrofragments.output.spatial import SpatialGrid
+from hydrofragments.riverscape.codes import (
+    LANDFORM_CODES,
+    LANDFORM_IN_CHANNEL,
+    LANDFORM_OFF_CHANNEL_RIVERINE,
+    LANDFORM_OUTSIDE,
+)
 
 if TYPE_CHECKING:
     from hydrofragments.io.dea import WoStatistics
+
+_ZONE_MODES = frozenset({"occurrence", "riverscape"})
 
 
 @dataclass(frozen=True)
@@ -24,6 +40,17 @@ class ZoneResult:
     has_zone_1: bool
     source: str = "occurrence"
     grid: SpatialGrid | None = None
+    mode: str = "occurrence"
+    crosstab: np.ndarray | None = None
+    degraded_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.mode not in _ZONE_MODES:
+            raise ValueError(f"ZoneResult mode must be one of {sorted(_ZONE_MODES)}")
+        if self.mode == "riverscape" and self.crosstab is None:
+            raise ValueError("riverscape ZoneResult requires a crosstab")
+        if self.crosstab is not None and np.shape(self.crosstab) != np.shape(self.mask):
+            raise ValueError("ZoneResult crosstab must share the mask shape")
 
     def as_dataarray(self) -> xr.DataArray:
         """Return the zone mask as a georeferenced ``DataArray``."""
@@ -157,4 +184,59 @@ def zones_from_wo_statistics(
     return _attach_grid(result, stats.frequency)
 
 
-__all__ = ["ZoneResult", "build_zones", "zones_from_wo_statistics"]
+def _validated_codes(values: np.ndarray, allowed: frozenset[int], name: str) -> np.ndarray:
+    invalid = sorted(set(np.unique(values).tolist()) - set(allowed))
+    if invalid:
+        raise ValueError(f"{name} has invalid codes: {invalid}")
+    return values.astype(np.uint8)
+
+
+def combine_zones(
+    landform,
+    hydroperiod,
+    *,
+    source: str = "riverscape",
+    degraded_reasons: tuple[str, ...] = (),
+) -> ZoneResult:
+    """Derive zones from the landform and hydroperiod layers; no new logic.
+
+    ``crosstab = landform * 10 + hydroperiod`` (0 outside). Legacy view:
+    Z1 = in-channel (any hydroperiod, including unobserved bridges);
+    Z2/Z3/Z4 = off-channel riverine x persistent/seasonal/marginal;
+    non-riverine water is 0. The two layers must agree on the zoned extent,
+    and ``unobserved`` is only valid on in-channel pixels.
+    """
+    landform_values = np.asarray(landform)
+    hydroperiod_values = np.asarray(hydroperiod)
+    if landform_values.ndim != 2:
+        raise ValueError("landform must be a 2-D array")
+    if hydroperiod_values.shape != landform_values.shape:
+        raise ValueError("landform and hydroperiod must share shape")
+    lf = _validated_codes(landform_values, LANDFORM_CODES, "landform")
+    hp = _validated_codes(hydroperiod_values, HYDROPERIOD_CODES, "hydroperiod")
+
+    if np.any((lf == LANDFORM_OUTSIDE) != (hp == HYDROPERIOD_OUTSIDE)):
+        raise ValueError("landform and hydroperiod disagree on the zoned extent")
+    if np.any((hp == HYDROPERIOD_UNOBSERVED) & (lf != LANDFORM_IN_CHANNEL)):
+        raise ValueError("unobserved hydroperiod is only valid for in-channel landform")
+
+    crosstab = np.where(lf == LANDFORM_OUTSIDE, 0, lf * 10 + hp).astype(np.uint8)
+    off_channel = lf == LANDFORM_OFF_CHANNEL_RIVERINE
+    mask = np.zeros(lf.shape, dtype=np.uint8)
+    mask[lf == LANDFORM_IN_CHANNEL] = 1
+    mask[off_channel & (hp == HYDROPERIOD_PERSISTENT)] = 2
+    mask[off_channel & (hp == HYDROPERIOD_SEASONAL)] = 3
+    mask[off_channel & (hp == HYDROPERIOD_MARGINAL)] = 4
+
+    return ZoneResult(
+        mask=mask,
+        emitted_zones=(1, 2, 3, 4),
+        has_zone_1=True,
+        source=source,
+        mode="riverscape",
+        crosstab=crosstab,
+        degraded_reasons=tuple(degraded_reasons),
+    )
+
+
+__all__ = ["ZoneResult", "build_zones", "combine_zones", "zones_from_wo_statistics"]
