@@ -155,6 +155,16 @@ without touching Layer 1.
 Non-riverine pixels are 0 in the legacy view; their count and area are
 recorded in provenance.
 
+`emitted_zones`/`has_zone_1` on the returned `ZoneResult` are **derived from
+the mask actually produced**, matching occurrence mode's convention
+(`build_zones` reports `(2,3,4)`/`False` with no drainage): `emitted_zones =
+tuple(sorted(unique nonzero legacy zone codes present))`, `has_zone_1 = 1 in
+mask`. A degraded `auto` run with zero in-channel pixels must not advertise
+Zone 1. (Superseded decision, recorded 2026-09-14: `combine_zones`'s first
+implementation hardcoded `(1,2,3,4)`/`True` unconditionally; that shipped in
+Plan 1's Task 4 with a test pinning the hardcoded values. Plan 2 corrects
+this and updates that test.)
+
 This framing follows the landform × hydroperiod classification of
 Semeniuk & Semeniuk (1995).
 
@@ -223,8 +233,17 @@ Rules:
 4. **Channel rules (landform 1).** Per-pixel evidence bits within the domain:
    - `W_high`: `freq >= f_chan_high`
    - `S`: inside a riverine DEA Waterbodies polygon
-   - `B`: bare percentile `>= bare_threshold_pct` in `>= bare_year_fraction`
-     of years
+   - `B`: bare percentile `>= bare_threshold(run)` in `>= bare_year_fraction`
+     of years — `bare_threshold` is **calibrated per run**, not a fixed
+     constant, mirroring the envelope's own per-run calibration in step 7:
+     fit from the run's own bare-vs-background contrast (e.g. a quantile of
+     the bare-percentile distribution on channel-connected wet/trough pixels
+     vs. the AOI background), because a fixed default cannot travel between
+     catchments — Fitzroy's Phase 0 spike measured `bs_pc_50` at 20.5 AOI-wide
+     vs. 31.5 on the water seed, both far under a fixed 50. `bare_threshold_pct`
+     stays in config only as the calibration's floor/fallback when too few
+     pixels are available to calibrate (mirroring `envelope_min_bin_pixels`'s
+     degraded path), recorded as degraded when used.
    - `T`: `REM <= h_chan_m` or trough depth `>= trough_depth_m`
    - `C`: connected to the centreline
 
@@ -481,41 +500,34 @@ widths are consistency checks.
 ## 12. Carried into Plan 2 (Plan 1 final-review findings)
 
 Plan 1's whole-branch review (commit `e1e4cf8`, all 5 tasks approved) raised
-five findings that are correct but out of Plan 1's scope. One (the import-
-cycle guard) was fixed immediately as a small, isolated addition
-(`c9e3bf0`). The rest are recorded here so Plan 2 does not have to
-re-derive them:
+five findings that are correct but out of Plan 1's scope. Three are now
+resolved by decision (below); the import-cycle guard was fixed immediately
+(`c9e3bf0`). Two remain open as Plan 2 inputs:
 
-- **`emitted_zones`/`has_zone_1` semantics differ by mode.** In occurrence
-  mode (`build_zones`) these fields are *derived* from what the mask
-  actually contains (e.g. `(2,3,4)`/`False` with no drainage). In riverscape
-  mode (`combine_zones`) they are currently *hardcoded* to `(1,2,3,4)`/`True`
-  regardless of the mask's actual content — a degraded `auto` run with zero
-  in-channel pixels would still advertise Zone 1. This was Task 4's literal,
-  tested contract (`tests/spatial/test_zone_combination.py`), so changing it
-  now would break an already-approved test; it is a decision for whoever
-  writes `zones_from_riverscape` (§7, `output/finalize.py`,
-  `output/manifest.py` are the consumers that would observe either choice).
-  **Decision needed:** derive both fields from the mask in riverscape mode
-  too (matching occurrence mode's philosophy), or keep them mode-declared
-  and document why the two modes mean different things.
-- **The Fitzroy Phase 0 AOI is ~542 km² of lower mainstem, not the
-  catchment**, and its `UpstrDArea` distribution is consequently degenerate
-  (p50 ≈ p95 ≈ 53,000–54,000 km² across 291 reaches — nearly every reach in
-  the window is mainstem). §4.2 step 7's per-log-A-bin envelope fit will
-  very likely fall into the `<2 usable bins → b=0, degraded` branch on this
-  AOI. Plan 2 should either widen the Phase 0 AOI before calibrating the
-  envelope, or treat the degraded-fit path as the expected case for this
-  test catchment and validate it deliberately rather than by accident.
-- **`bare_threshold_pct` (default 50, §6) is not supported by the Phase 0
-  FC medians.** `bs_pc_50` on the EO water seed is 31.5, on the `dem_s`
-  trough 23.0, AOI-wide 20.5 — a ~10 pp lift over background, well under 50.
-  B evidence (§4.2 step 4) needs either a lower default threshold or a
-  per-run calibrated one (mirroring the envelope's own per-run calibration
-  in §4.2 step 7) before it can contribute meaningfully to channel rules.
-  The Phase 0 FC sample is also only two annual composites
-  (`2022-01-01/2023-12-31`); `bare_year_fraction = 0.6` (§6) needs more
-  years than Phase 0 measured to be checked at all.
+**Resolved by decision (2026-09-14):**
+- `emitted_zones`/`has_zone_1` semantics — resolved: derive from the mask in
+  riverscape mode too (§3.4, above). Plan 2 corrects `combine_zones` and
+  updates the pinned test in `tests/spatial/test_zone_combination.py`.
+- `bare_threshold_pct` unsupported by measured FC values — resolved:
+  per-run calibration (§4.2 step 4, above), config value becomes a
+  degraded-path floor, not the primary threshold.
+- Fitzroy Phase 0 AOI is mainstem-only, degenerate `UpstrDArea` — resolved:
+  **widen now**, to the full Fitzroy River basin (~94,000 km², headwaters to
+  mouth), before Plan 2 calibrates the envelope or the bare threshold.
+  Source: query DEA/Geofabric WFS for the wider AHGF network + basin
+  boundary (same access pattern as the Phase 0 DEA Waterbodies WFS query),
+  replacing `data/fitzroy_kimberley_aoi.geojson` and
+  `data/fitzroy_kimberley_drainage.gpkg`. Plan 2's first task re-runs a
+  Phase-0-style check (grid alignment, `UpstrDArea` spread, AHGF/EO offset,
+  bare-vs-background contrast) against the widened data and updates
+  `docs/superpowers/specs/2026-09-14-riverscape-phase0-findings.md`
+  accordingly — the current findings doc's DEM-band decision and access
+  routes should still hold (they don't depend on AOI size), but every
+  distribution-based number (AHGF offset percentiles, `UpstrDArea`
+  quantiles, FC medians) must be re-measured on the wider extent, not
+  patched by inference.
+
+**Still open, Plan 2 inputs:**
 - **No test exercises the full call chain** `WoStatistics → wet_domain →
   classify_hydroperiod → combine_zones` — the exact sequence
   `analyze_from_dea` will use — including the bridged case where the
