@@ -240,6 +240,17 @@ orders of magnitude (p1 ≈ 0.28 km² to p99 ≈ 53,594 km²).
 | pv_pc_50 | 4.5 | 21.5 | 20.5 |
 | npv_pc_50 | 76.0 | 50.5 | 49.0 |
 
+**Trough column is not calibration signal:** the trough mask covers 21% of
+the entire basin (43,074,902 / 205,430,829 pixels) — at this AOI's 11×11
+window and 0.5 m depth threshold, this is SRTM vertical noise, not real
+channel troughs. Evidence: every trough-column median above (22.0 / 21.5 /
+50.5) is within ~3-10% of the corresponding AOI-wide median (24.5 / 20.5 /
+49.0), i.e. the trough mask does not discriminate from the basin at large.
+By contrast the seed-water column *does* discriminate (e.g. bs_pc_50: 7.5
+seed-water vs 24.5 AOI, a 3.3x contrast). Task 4 should not treat the
+trough column as an independent calibration anchor — only the seed-water
+column carries real signal at this scale.
+
 **Comparison with the narrow AOI:** narrow-AOI `bs_pc_50` was 31.5 (seed) /
 20.5 (AOI) — the basin-wide **AOI** median (24.5) is broadly similar (within
 ~20%), but the basin-wide **seed-water** median (7.5) is materially
@@ -259,14 +270,25 @@ follow-up binned by reach or region.
   polling `Get-Process -Id <pid> | Select WorkingSet64` every 15 s for the
   process lifetime, tracking the running maximum — Windows equivalent of
   `resource.getrusage(...).ru_maxrss`). This exceeds the brief's own
-  ~800 MB–1.2 GB per-step estimate by roughly 15x: the nodata-masking fix
-  (`values.where(values != nodata)`) builds xarray-level intermediate
-  copies beyond the raw float32 path the original design assumed. It
-  stayed well within this machine's headroom throughout (system had
-  66.9 GB total / ≥28.6 GB free at every observed peak; no swapping, no OS
-  kill), so it did not warrant a BLOCKED report, but a memory-conscious
-  follow-up should mask nodata via plain `numpy.where` on the already-cast
-  float32 array rather than through xarray's `.where`.
+  ~800 MB–1.2 GB per-step estimate by roughly 15x. Cause not isolated by
+  per-step measurement; candidates include the float32 upcast
+  (`data.astype("float32")` on a uint8 FC band quadruples that band's
+  working set before masking or reduction even run) and the NaN-aware
+  temporal median (`nanmedian`/`.median("time", skipna=True)` routes
+  through masked-array machinery with its own internal copies), not only
+  the `.where()` call itself. It stayed well within this machine's
+  headroom throughout (system had 66.9 GB total / ≥28.6 GB free at every
+  observed peak; no swapping, no OS kill), so it did not warrant a
+  BLOCKED report. A follow-up wanting to reduce this should profile each
+  step (upcast, mask, reduction) before choosing a fix rather than
+  assuming `.where()` is the dominant cost — swapping xarray's `.where()`
+  for plain `numpy.where()` on the cast array is not expected to help,
+  since neither candidate above is specific to xarray's `.where`.
+  Whatever a future memory fix changes, masking nodata to NaN must
+  continue to happen *before* the `"time"` median reduction, not after —
+  that ordering is the root cause of the nodata-masking bug fixed in this
+  task (see above); a fix that only preserves "mask nodata" without
+  preserving "before the reduction" would silently reintroduce it.
 - FC-band computation approach used: one-band-at-a-time eager
   materialization (as designed), with nodata masked to NaN via xarray
   `.where()` before each band's `.median("time", skipna=True)` reduction.

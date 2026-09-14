@@ -84,7 +84,7 @@ def _percentiles_px(distances_px: np.ndarray) -> dict[str, float] | None:
     }
 
 
-def _band_array(dataset, band: str) -> np.ndarray:
+def _band_array(dataset, band: str) -> tuple[np.ndarray, float]:
     """Load one band eagerly as float32 (~800MB at this AOI's pixel count).
 
     Masks the band's declared nodata sentinel to NaN *before* any time
@@ -108,18 +108,34 @@ def _band_array(dataset, band: str) -> np.ndarray:
         to NaN/extreme values across virtually the whole raster, so
         ``depth >= TROUGH_DEPTH_M`` is never true and trough_pixels reads 0
         even though real terrain relief exists.
+
+    Raises ``RuntimeError`` if the band carries no declared ``nodata``
+    attribute. A missing attribute must not silently skip masking --
+    letting the band flow through unmasked would silently reproduce the
+    exact degenerate-output bug fixed here (see "Nodata-masking bug found
+    and fixed during this task" in
+    docs/superpowers/specs/2026-09-14-riverscape-phase0-findings.md), with
+    nothing raised and nothing recorded. Per the project rule, invalid
+    inputs raise errors naming the violated contract rather than falling
+    back silently.
+
+    Returns the masked/reduced array and the declared nodata value used to
+    mask it, so callers can record both in ``findings`` and make masking
+    self-evidencing in the JSON output.
     """
     data = dataset[band]
     nodata = data.attrs.get("nodata")
     if nodata is None:
-        nodata = getattr(getattr(data, "rio", None), "nodata", None)
+        raise RuntimeError(
+            f"{band}: no declared nodata attribute -- contract requires masking "
+            f"against a declared sentinel before reduction (see basin-scale rerun bug)"
+        )
     print(f"  {band}: declared nodata = {nodata!r}")
     values = data.astype("float32")
-    if nodata is not None:
-        values = values.where(values != float(nodata))
+    values = values.where(values != float(nodata))
     if "time" in values.dims:
         values = values.median("time", skipna=True)
-    return np.asarray(values, dtype=np.float32)
+    return np.asarray(values, dtype=np.float32), float(nodata)
 
 
 def _masked_median(values: np.ndarray, mask: np.ndarray) -> float | None:
@@ -207,7 +223,7 @@ def main() -> int:
         dem_ds = odc.stac.load(
             dem_items, bands=[DEM_BAND], geobox=geobox, resampling="bilinear"
         )
-        dem = _band_array(dem_ds, DEM_BAND)
+        dem, dem_nodata = _band_array(dem_ds, DEM_BAND)
         dem_finite_fraction = float(np.isfinite(dem).mean())
         local_mean = ndimage.uniform_filter(
             np.where(np.isfinite(dem), dem, np.nanmean(dem)), size=2 * TROUGH_RADIUS_PX + 1
@@ -216,6 +232,8 @@ def main() -> int:
         findings["dem"] = {
             "stac_url": dem_url,
             "band": DEM_BAND,
+            "nodata": dem_nodata,
+            "masked": True,
             "finite_fraction": dem_finite_fraction,
             "trough_pixels": int(trough.sum()),
         }
@@ -233,8 +251,10 @@ def main() -> int:
             fc_ds = odc.stac.load(
                 fc_items, bands=[band], geobox=geobox, resampling="nearest"
             )
-            values = _band_array(fc_ds, band)
+            values, band_nodata = _band_array(fc_ds, band)
             band_stats[band] = {
+                "nodata": band_nodata,
+                "masked": True,
                 "median_on_seed_water": _masked_median(values, water),
                 "median_on_trough": _masked_median(values, trough),
                 "median_aoi": float(np.nanmedian(values)),
