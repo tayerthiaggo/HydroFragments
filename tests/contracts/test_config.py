@@ -349,3 +349,51 @@ def test_metric_override_validation_failures(
 
     with pytest.raises(ConfigError, match=match):
         HydroConfig.from_mapping(minimal_config(metric_overrides=overrides))
+
+
+def test_riverscape_config_has_documented_defaults() -> None:
+    from hydrofragments.config import HydroConfig
+
+    config = HydroConfig.from_mapping(minimal_config())
+
+    assert config.riverscape.mode == "auto"
+    assert config.riverscape.dem_product == "ga_srtm_dem1sv1_0"
+    assert config.riverscape.dem_band == "dem_s"
+    assert config.riverscape.fc_product == "ga_ls_fc_pc_cyear_3"
+    assert config.riverscape.bare_band == "bs_pc_50"
+    assert config.riverscape.green_band == "pv_pc_50"
+    assert 0.0 < config.riverscape.f_seed < config.riverscape.f_chan_high < 1.0
+    assert config.riverscape.corridor_min_m < config.riverscape.corridor_max_m
+    assert config.riverscape.min_channel_confidence >= 1
+
+
+def test_riverscape_config_rejects_bad_mode() -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match="riverscape.mode"):
+        HydroConfig.from_mapping(minimal_config(riverscape={"mode": "sometimes"}))
+
+
+def test_riverscape_config_rejects_f_seed_above_f_chan_high() -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match="f_seed"):
+        HydroConfig.from_mapping(
+            minimal_config(riverscape={"f_seed": 0.5, "f_chan_high": 0.1})
+        )
+
+
+def test_riverscape_config_rejects_inverted_corridor_bounds() -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match="corridor_min_m"):
+        HydroConfig.from_mapping(
+            minimal_config(riverscape={"corridor_min_m": 600, "corridor_max_m": 90})
+        )
+
+
+def test_unknown_riverscape_key_is_rejected() -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match=r"unknown config key.*riverscape\.mystery"):
+        HydroConfig.from_mapping(minimal_config(riverscape={"mystery": True}))

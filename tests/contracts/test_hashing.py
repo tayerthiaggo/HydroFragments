@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 GOLDEN_MINIMAL_CONFIG_HASH = (
-    "cd1f86765a2e2410206f89f0b12cb0c0cada5ae0205b6350af0fb8911f73c72b"
+    "5ba5b984710ba96baa887a2e33043dd89803b4692b062b89b83f96860306e3ea"
 )
 
 

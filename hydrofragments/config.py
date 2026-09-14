@@ -11,7 +11,7 @@ import math
 from typing import Any, Literal, Mapping
 
 ACCEPTED_CONFIG_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
-SCIENTIFIC_HASH_SCHEMA_VERSION = "1.1.0"
+SCIENTIFIC_HASH_SCHEMA_VERSION = "1.2.0"
 HASH_ALGORITHM_VERSION = "sha256-json-v1"
 
 SpatialProduct = Literal[
@@ -96,6 +96,69 @@ class PersistenceConfig:
 class ZonesConfig:
     t_persist: float = 0.50
     t_season: float = 0.10
+
+
+@dataclass(frozen=True)
+class RiverscapeConfig:
+    mode: str = "auto"
+    dem_product: str = "ga_srtm_dem1sv1_0"
+    dem_band: str = "dem_s"
+    fc_product: str = "ga_ls_fc_pc_cyear_3"
+    bare_band: str = "bs_pc_50"
+    green_band: str = "pv_pc_50"
+    npv_band: str = "npv_pc_50"
+    waterbodies_source: str | None = None
+    f_seed: float = 0.05
+    f_chan_high: float = 0.10
+    # Basin-scale rerun (Plan 2, Task 3; see
+    # docs/superpowers/specs/2026-09-14-riverscape-phase0-findings.md,
+    # "Basin-scale rerun" section): bare_threshold_floor_pct is a
+    # degraded-path *fallback* used only when per-run calibration (spec
+    # §4.2 step 4) cannot run, not the primary threshold and not a
+    # min-clamp on the calibrated value. Measured seed-water bs_pc_50
+    # medians were 31.5 (narrow AOI) and 7.5 (basin-wide) -- both well
+    # under the Plan 1 placeholder of 50.0, and the basin-wide value is
+    # itself an aggregate over highly heterogeneous landscapes (coastal
+    # mudflats to arid interior), so it is not a safe single fallback
+    # either. 30.0 sits near the higher (narrow-AOI) end of the observed
+    # range: low enough to be plausible in the AOIs measured so far, but
+    # not pinned to the basin-wide aggregate's low outlier, which the
+    # findings doc flags as needing further per-reach study before it
+    # could be trusted as a fallback on its own.
+    bare_threshold_floor_pct: float = 30.0
+    bare_year_fraction: float = 0.6
+    trough_radius_m: float = 150.0
+    trough_depth_m: float = 0.5
+    h_chan_m: float = 2.0
+    corridor_min_m: float = 90.0
+    # Basin-scale rerun (Plan 2, Task 3): the basin-wide line->EO-skeleton
+    # offset p95 is 924.18 m (up from the narrow AOI's already-saturating
+    # 630.71 m), so the Plan 1 placeholder ceiling of 600.0 m is too tight
+    # at basin scale ("The 600 m ceiling remains too tight for this
+    # catchment's measured AHGF/EO offset at basin scale." -- findings
+    # doc). 1200.0 m clears the measured p95 with roughly 30% headroom;
+    # it is deliberately not set to exactly 924.18 since p95 is a soft
+    # distributional boundary and this field is a hard ceiling, not a
+    # p95 pin.
+    corridor_max_m: float = 1200.0
+    alignment_quantile: float = 0.95
+    width_growth_factor: float = 3.0
+    profile_bin_m: float = 300.0
+    profile_percentile: float = 10.0
+    rem_k: int = 8
+    rem_max_distance_m: float = 5000.0
+    envelope_quantile: float = 0.95
+    envelope_h_max_m: float = 15.0
+    envelope_min_bin_pixels: int = 200
+    slope_max_deg: float = 2.0
+    min_channel_confidence: int = 2
+    include_line_fallback_in_channel: bool = False
+    bridge_enabled: bool = True
+    bridge_max_length_m: float = 2000.0
+    bridge_max_cost_per_m: float = 1.0
+    bridge_rem_max_m: float = 5.0
+    riparian_green_pct: float = 40.0
+    narrow_width_px: int = 2
 
 
 @dataclass(frozen=True)
@@ -191,6 +254,7 @@ _TOP_LEVEL_KEYS = {
     "patches",
     "persistence",
     "zones",
+    "riverscape",
     "temporal",
     "dynamics",
     "hydroyear",
@@ -348,6 +412,7 @@ class HydroConfig:
     patches: PatchesConfig = field(default_factory=PatchesConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     zones: ZonesConfig = field(default_factory=ZonesConfig)
+    riverscape: RiverscapeConfig = field(default_factory=RiverscapeConfig)
     dynamics: DynamicsConfig = field(default_factory=DynamicsConfig)
     hydroyear: HydroYearConfig = field(default_factory=HydroYearConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
@@ -525,6 +590,188 @@ class HydroConfig:
         )
         if zones.t_season >= zones.t_persist:
             raise ConfigError("zones.t_season must be less than zones.t_persist")
+
+        riverscape_raw = _section(
+            source,
+            "riverscape",
+            {
+                "mode", "dem_product", "dem_band", "fc_product", "bare_band",
+                "green_band", "npv_band", "waterbodies_source", "f_seed",
+                "f_chan_high", "bare_threshold_floor_pct", "bare_year_fraction",
+                "trough_radius_m", "trough_depth_m", "h_chan_m",
+                "corridor_min_m", "corridor_max_m", "alignment_quantile",
+                "width_growth_factor", "profile_bin_m", "profile_percentile",
+                "rem_k", "rem_max_distance_m", "envelope_quantile",
+                "envelope_h_max_m", "envelope_min_bin_pixels", "slope_max_deg",
+                "min_channel_confidence", "include_line_fallback_in_channel",
+                "bridge_enabled", "bridge_max_length_m", "bridge_max_cost_per_m",
+                "bridge_rem_max_m", "riparian_green_pct", "narrow_width_px",
+            },
+        )
+        riverscape_defaults = RiverscapeConfig()
+        riverscape_mode = str(riverscape_raw.get("mode", riverscape_defaults.mode))
+        if riverscape_mode not in {"off", "auto", "required"}:
+            raise ConfigError(
+                f"riverscape.mode has unsupported value: {riverscape_mode}"
+            )
+        riverscape_f_seed = _fraction(
+            riverscape_raw.get("f_seed", riverscape_defaults.f_seed),
+            "riverscape.f_seed",
+        )
+        riverscape_f_chan_high = _fraction(
+            riverscape_raw.get("f_chan_high", riverscape_defaults.f_chan_high),
+            "riverscape.f_chan_high",
+        )
+        if riverscape_f_seed > riverscape_f_chan_high:
+            raise ConfigError("riverscape.f_seed must not exceed riverscape.f_chan_high")
+        riverscape_corridor_min = float(
+            riverscape_raw.get("corridor_min_m", riverscape_defaults.corridor_min_m)
+        )
+        riverscape_corridor_max = float(
+            riverscape_raw.get("corridor_max_m", riverscape_defaults.corridor_max_m)
+        )
+        if not (
+            math.isfinite(riverscape_corridor_min)
+            and math.isfinite(riverscape_corridor_max)
+            and 0.0 < riverscape_corridor_min < riverscape_corridor_max
+        ):
+            raise ConfigError(
+                "riverscape.corridor_min_m must be positive and less than "
+                "riverscape.corridor_max_m"
+            )
+        riverscape = RiverscapeConfig(
+            mode=riverscape_mode,
+            dem_product=str(
+                riverscape_raw.get("dem_product", riverscape_defaults.dem_product)
+            ),
+            dem_band=str(riverscape_raw.get("dem_band", riverscape_defaults.dem_band)),
+            fc_product=str(
+                riverscape_raw.get("fc_product", riverscape_defaults.fc_product)
+            ),
+            bare_band=str(
+                riverscape_raw.get("bare_band", riverscape_defaults.bare_band)
+            ),
+            green_band=str(
+                riverscape_raw.get("green_band", riverscape_defaults.green_band)
+            ),
+            npv_band=str(riverscape_raw.get("npv_band", riverscape_defaults.npv_band)),
+            waterbodies_source=riverscape_raw.get("waterbodies_source"),
+            f_seed=riverscape_f_seed,
+            f_chan_high=riverscape_f_chan_high,
+            bare_threshold_floor_pct=_percentage(
+                riverscape_raw.get(
+                    "bare_threshold_floor_pct",
+                    riverscape_defaults.bare_threshold_floor_pct,
+                ),
+                "riverscape.bare_threshold_floor_pct",
+            ),
+            bare_year_fraction=_fraction(
+                riverscape_raw.get(
+                    "bare_year_fraction", riverscape_defaults.bare_year_fraction
+                ),
+                "riverscape.bare_year_fraction",
+            ),
+            trough_radius_m=float(
+                riverscape_raw.get("trough_radius_m", riverscape_defaults.trough_radius_m)
+            ),
+            trough_depth_m=float(
+                riverscape_raw.get("trough_depth_m", riverscape_defaults.trough_depth_m)
+            ),
+            h_chan_m=float(riverscape_raw.get("h_chan_m", riverscape_defaults.h_chan_m)),
+            corridor_min_m=riverscape_corridor_min,
+            corridor_max_m=riverscape_corridor_max,
+            alignment_quantile=_fraction(
+                riverscape_raw.get(
+                    "alignment_quantile", riverscape_defaults.alignment_quantile
+                ),
+                "riverscape.alignment_quantile",
+            ),
+            width_growth_factor=float(
+                riverscape_raw.get(
+                    "width_growth_factor", riverscape_defaults.width_growth_factor
+                )
+            ),
+            profile_bin_m=float(
+                riverscape_raw.get("profile_bin_m", riverscape_defaults.profile_bin_m)
+            ),
+            profile_percentile=_percentage(
+                riverscape_raw.get(
+                    "profile_percentile", riverscape_defaults.profile_percentile
+                ),
+                "riverscape.profile_percentile",
+            ),
+            rem_k=int(riverscape_raw.get("rem_k", riverscape_defaults.rem_k)),
+            rem_max_distance_m=float(
+                riverscape_raw.get(
+                    "rem_max_distance_m", riverscape_defaults.rem_max_distance_m
+                )
+            ),
+            envelope_quantile=_fraction(
+                riverscape_raw.get(
+                    "envelope_quantile", riverscape_defaults.envelope_quantile
+                ),
+                "riverscape.envelope_quantile",
+            ),
+            envelope_h_max_m=float(
+                riverscape_raw.get(
+                    "envelope_h_max_m", riverscape_defaults.envelope_h_max_m
+                )
+            ),
+            envelope_min_bin_pixels=int(
+                riverscape_raw.get(
+                    "envelope_min_bin_pixels",
+                    riverscape_defaults.envelope_min_bin_pixels,
+                )
+            ),
+            slope_max_deg=float(
+                riverscape_raw.get("slope_max_deg", riverscape_defaults.slope_max_deg)
+            ),
+            min_channel_confidence=int(
+                riverscape_raw.get(
+                    "min_channel_confidence",
+                    riverscape_defaults.min_channel_confidence,
+                )
+            ),
+            include_line_fallback_in_channel=bool(
+                riverscape_raw.get(
+                    "include_line_fallback_in_channel",
+                    riverscape_defaults.include_line_fallback_in_channel,
+                )
+            ),
+            bridge_enabled=bool(
+                riverscape_raw.get(
+                    "bridge_enabled", riverscape_defaults.bridge_enabled
+                )
+            ),
+            bridge_max_length_m=float(
+                riverscape_raw.get(
+                    "bridge_max_length_m", riverscape_defaults.bridge_max_length_m
+                )
+            ),
+            bridge_max_cost_per_m=float(
+                riverscape_raw.get(
+                    "bridge_max_cost_per_m", riverscape_defaults.bridge_max_cost_per_m
+                )
+            ),
+            bridge_rem_max_m=float(
+                riverscape_raw.get(
+                    "bridge_rem_max_m", riverscape_defaults.bridge_rem_max_m
+                )
+            ),
+            riparian_green_pct=_percentage(
+                riverscape_raw.get(
+                    "riparian_green_pct", riverscape_defaults.riparian_green_pct
+                ),
+                "riverscape.riparian_green_pct",
+            ),
+            narrow_width_px=int(
+                riverscape_raw.get(
+                    "narrow_width_px", riverscape_defaults.narrow_width_px
+                )
+            ),
+        )
+        if riverscape.min_channel_confidence < 1:
+            raise ConfigError("riverscape.min_channel_confidence must be at least 1")
 
         temporal_raw = _section(
             source,
@@ -801,6 +1048,7 @@ class HydroConfig:
             patches=patches,
             persistence=persistence,
             zones=zones,
+            riverscape=riverscape,
             dynamics=dynamics,
             hydroyear=hydroyear,
             channel=channel,
@@ -858,6 +1106,45 @@ class HydroConfig:
                 ),
             },
             "persistence": {"refuge_threshold": self.persistence.refuge_threshold},
+            "riverscape": {
+                "alignment_quantile": self.riverscape.alignment_quantile,
+                "bare_band": self.riverscape.bare_band,
+                "bare_threshold_floor_pct": self.riverscape.bare_threshold_floor_pct,
+                "bare_year_fraction": self.riverscape.bare_year_fraction,
+                "bridge_enabled": self.riverscape.bridge_enabled,
+                "bridge_max_cost_per_m": self.riverscape.bridge_max_cost_per_m,
+                "bridge_max_length_m": self.riverscape.bridge_max_length_m,
+                "bridge_rem_max_m": self.riverscape.bridge_rem_max_m,
+                "corridor_max_m": self.riverscape.corridor_max_m,
+                "corridor_min_m": self.riverscape.corridor_min_m,
+                "dem_band": self.riverscape.dem_band,
+                "dem_product": self.riverscape.dem_product,
+                "envelope_h_max_m": self.riverscape.envelope_h_max_m,
+                "envelope_min_bin_pixels": self.riverscape.envelope_min_bin_pixels,
+                "envelope_quantile": self.riverscape.envelope_quantile,
+                "f_chan_high": self.riverscape.f_chan_high,
+                "f_seed": self.riverscape.f_seed,
+                "fc_product": self.riverscape.fc_product,
+                "green_band": self.riverscape.green_band,
+                "h_chan_m": self.riverscape.h_chan_m,
+                "include_line_fallback_in_channel": (
+                    self.riverscape.include_line_fallback_in_channel
+                ),
+                "min_channel_confidence": self.riverscape.min_channel_confidence,
+                "mode": self.riverscape.mode,
+                "narrow_width_px": self.riverscape.narrow_width_px,
+                "npv_band": self.riverscape.npv_band,
+                "profile_bin_m": self.riverscape.profile_bin_m,
+                "profile_percentile": self.riverscape.profile_percentile,
+                "rem_k": self.riverscape.rem_k,
+                "rem_max_distance_m": self.riverscape.rem_max_distance_m,
+                "riparian_green_pct": self.riverscape.riparian_green_pct,
+                "slope_max_deg": self.riverscape.slope_max_deg,
+                "trough_depth_m": self.riverscape.trough_depth_m,
+                "trough_radius_m": self.riverscape.trough_radius_m,
+                "waterbodies_source": self.riverscape.waterbodies_source,
+                "width_growth_factor": self.riverscape.width_growth_factor,
+            },
             "spatial": {
                 "area_method": self.spatial.area_method,
                 "target_crs": self.spatial.target_crs,
@@ -938,5 +1225,6 @@ __all__ = [
     "HASH_ALGORITHM_VERSION",
     "HydroConfig",
     "LowSupportBehavior",
+    "RiverscapeConfig",
     "SCIENTIFIC_HASH_SCHEMA_VERSION",
 ]
