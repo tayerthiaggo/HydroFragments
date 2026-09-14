@@ -167,3 +167,7 @@ STAC item's assets — no fallback to a "closest present" name was needed.)
   calling `open_wo_statistics_for_zoning`, so hydroseason's own
   snapshot/restore cycle preserves it) rather than assuming unsigned S3
   access stays configured after the call returns.
+
+## Plan 1 completion
+- Full suite: 894 passed, 1 failed (tests/release/test_branding.py::test_tracked_text_uses_only_readme_lineage_mention) — both known pre-existing failure categories in this repo are unrelated to this plan: the one that fired this run, tests/release/test_branding.py::test_tracked_text_uses_only_readme_lineage_mention (deterministic, pre-existing since commit 6bd26c6, failing because docs/superpowers/plans/2026-07-20-user-ready-implementation.md — last touched at 8a70e74 — mentions a retired package name), and a second category that did not fire this run but is also pre-existing and accepted: an intermittent Windows bundle-rename race (`PermissionError: [WinError 5] Access is denied`) in `hydrofragments/output/bundle.py::commit_staged_bundle`, documented in `docs/superpowers/plans/2026-08-12-dynamics-and-spatial-exports.md`.
+- Commit: 37e3095
