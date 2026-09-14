@@ -49,8 +49,20 @@ def fetch_basin_boundary(*, river_region_name: str) -> gpd.GeoDataFrame:
             f"expected exactly one RiverRegion feature for {river_region_name!r}, "
             f"got {len(gdf)}"
         )
-    if gdf.crs is None or gdf.crs.to_string() != TARGET_CRS:
+    if gdf.crs is None:
+        # No silent fallback: only auto-set when the server genuinely
+        # declared no CRS (common for GeoJSON) -- EPSG:3577 is what we
+        # requested via outSR, so labeling it is safe here.
         gdf = gdf.set_crs(TARGET_CRS, allow_override=True)
+    elif gdf.crs.to_string() != TARGET_CRS:
+        # The server declared a real CRS that isn't what we asked for --
+        # e.g. it ignored outSR and returned WGS84. Silently relabeling
+        # would mislabel real lat/lon coordinates as Albers metres without
+        # reprojecting, so raise instead of coercing.
+        raise RuntimeError(
+            f"BOM query returned CRS {gdf.crs.to_string()!r}, expected {TARGET_CRS!r} "
+            f"(outSR={TARGET_CRS.split(':')[1]} was requested but the server did not honor it)"
+        )
     return gdf
 
 
@@ -63,17 +75,22 @@ def clip_network_to_basin(gdb_path: Path, basin: gpd.GeoDataFrame) -> gpd.GeoDat
         streams = streams.set_crs("EPSG:4283", allow_override=True)
     streams = streams.to_crs(TARGET_CRS)
     basin_geom = basin.geometry.iloc[0]
-    # Prepare the basin geometry before the vectorized intersects test below.
-    # Deviation from the brief's verbatim script: without this, .intersects()
-    # against the unprepared ~65k-vertex basin polygon was measured at ~27ms
-    # per candidate reach (500-row batch took 13.55s), i.e. tens of minutes
-    # for the full ~57k-row bbox superset -- not the "<2s" the brief's prior
-    # interactive run reported. shapely.prepare() builds an index once so
-    # each subsequent intersects() call against basin_geom is fast; it does
-    # not change which reaches end up in the output, only how fast the
-    # check runs.
+    # Prepare the basin geometry, then call shapely.intersects() with
+    # basin_geom as the LEFT operand. This matters: shapely's
+    # prepared-geometry speedup only fires when the prepared geometry is the
+    # left-hand operand of the predicate. GeoSeries.intersects() (i.e.
+    # `streams.intersects(basin_geom)`) always puts the GeoSeries array on
+    # the left and basin_geom on the right, so calling it that way after
+    # shapely.prepare(basin_geom) is a silent no-op -- confirmed by direct
+    # measurement: a 3000-row sample took ~6.05s unprepared and ~6.07s
+    # "prepared" via that right-operand form (no difference). Calling
+    # shapely.intersects(basin_geom, streams.geometry.values) instead --
+    # basin_geom explicitly on the left -- took ~0.018s for the same
+    # 3000 rows against the real ~65k-vertex / 43-part basin polygon, a
+    # ~330x speedup, with an identical result mask.
     shapely.prepare(basin_geom)
-    clipped = streams[streams.intersects(basin_geom)].copy()
+    mask = shapely.intersects(basin_geom, streams.geometry.values)
+    clipped = streams[mask].copy()
     if clipped.empty:
         raise RuntimeError("basin clip produced zero reaches -- check the GDB path and basin polygon")
     return clipped
