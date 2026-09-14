@@ -39,11 +39,30 @@ def test_combined_result_contract() -> None:
     assert result.crosstab.dtype == np.uint8
     assert result.mask.tolist() == [[1, 2], [0, 0]]
     assert result.crosstab.tolist() == [[14, 21], [32, 0]]
-    assert result.emitted_zones == (1, 2, 3, 4)
+    assert result.emitted_zones == (1, 2)
     assert result.has_zone_1 is True
     assert result.mode == "riverscape"
     assert result.source == "riverscape"
     assert result.degraded_reasons == ("envelope_single_bin",)
+
+
+def test_emitted_zones_and_has_zone_1_reflect_the_actual_mask() -> None:
+    off_channel_only = combine_zones(
+        np.array([[2, 2]], dtype=np.uint8), np.array([[1, 2]], dtype=np.uint8)
+    )
+    assert off_channel_only.emitted_zones == (2, 3)
+    assert off_channel_only.has_zone_1 is False
+
+    outside_only = combine_zones(np.array([[0]], dtype=np.uint8), np.array([[0]], dtype=np.uint8))
+    assert outside_only.emitted_zones == ()
+    assert outside_only.has_zone_1 is False
+
+    all_four = combine_zones(
+        np.array([[1, 2, 2, 2]], dtype=np.uint8),
+        np.array([[1, 1, 2, 3]], dtype=np.uint8),
+    )
+    assert all_four.emitted_zones == (1, 2, 3, 4)
+    assert all_four.has_zone_1 is True
 
 
 @pytest.mark.parametrize(

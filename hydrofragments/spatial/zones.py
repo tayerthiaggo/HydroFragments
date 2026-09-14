@@ -205,6 +205,11 @@ def combine_zones(
     Z2/Z3/Z4 = off-channel riverine x persistent/seasonal/marginal;
     non-riverine water is 0. The two layers must agree on the zoned extent,
     and ``unobserved`` is only valid on in-channel pixels.
+
+    ``emitted_zones``/``has_zone_1`` are derived from ``mask`` (the zones
+    actually present), matching ``build_zones``'s convention -- not declared
+    by mode. A degraded run with zero in-channel pixels reports
+    ``has_zone_1=False``.
     """
     landform_values = np.asarray(landform)
     hydroperiod_values = np.asarray(hydroperiod)
@@ -228,10 +233,12 @@ def combine_zones(
     mask[off_channel & (hp == HYDROPERIOD_SEASONAL)] = 3
     mask[off_channel & (hp == HYDROPERIOD_MARGINAL)] = 4
 
+    emitted_zones = tuple(sorted(int(z) for z in np.unique(mask) if z != 0))
+
     return ZoneResult(
         mask=mask,
-        emitted_zones=(1, 2, 3, 4),
-        has_zone_1=True,
+        emitted_zones=emitted_zones,
+        has_zone_1=bool(np.any(mask == 1)),
         source=source,
         mode="riverscape",
         crosstab=crosstab,
