@@ -114,6 +114,40 @@ def test_confluence_caps_downstream_reach_at_tributary_minimum_outflow() -> None
     assert not any("geometry_direction_suspect" in reason for reason in result.degraded_reasons)
 
 
+def test_reversed_reach_is_flagged_geometry_direction_suspect() -> None:
+    # Same confluence fixture as test_confluence_caps_downstream_reach_at_-
+    # tributary_minimum_outflow, but trib_low's endpoints are swapped so its
+    # LAST coordinate (assumed downstream per the module's docstring) is the
+    # upstream headwater end instead of the confluence node -- its first
+    # coordinate now sits closer to the downstream reach (the trunk) than
+    # its last coordinate does, which is exactly the condition build_rem
+    # flags as a suspect digitisation direction.
+    dem = _linear_dem(shape=(10, 10), slope_per_row=1.0, base=100.0)
+    dem[:, :5] -= 20.0
+
+    trunk = LineString([(150.0, 300.0 - 165.0), (150.0, 300.0 - 285.0)])
+    trib_low_reversed = LineString([(150.0, 300.0 - 165.0), (60.0, 300.0 - 15.0)])
+    trib_high = LineString([(240.0, 300.0 - 15.0), (150.0, 300.0 - 165.0)])
+
+    drainage = gpd.GeoDataFrame(
+        [
+            _reach(1, trunk, next_down=-1, from_node=10, to_node=20),
+            _reach(2, trib_low_reversed, next_down=1, from_node=11, to_node=10),
+            _reach(3, trib_high, next_down=1, from_node=12, to_node=10),
+        ],
+        crs="EPSG:3577",
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0,
+        corridor_widths_m={"1": 90.0, "2": 90.0, "3": 90.0},
+        rem_k=4, rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    assert "reach_2_geometry_direction_suspect" in result.degraded_reasons
+
+
 def test_rejects_missing_drainage_topology_columns() -> None:
     drainage = gpd.GeoDataFrame(
         {"HydroID": [1], "geometry": [LineString([(0.0, 0.0), (100.0, 100.0)])]}, crs="EPSG:3577"
