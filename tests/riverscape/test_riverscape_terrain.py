@@ -13,7 +13,7 @@ import pytest
 
 gpd = pytest.importorskip("geopandas")
 from affine import Affine
-from shapely.geometry import LineString, MultiLineString
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point
 
 from hydrofragments.riverscape.terrain import build_rem
 
@@ -308,6 +308,86 @@ def test_sample_buffer_uses_full_corridor_width_not_half() -> None:
     # far band is never reached, so the profile exactly matches the local
     # DEM and the lateral contamination this test is checking for vanishes.
     assert result.rem[1, 5] == pytest.approx(-600.0)
+
+
+def test_build_rem_degrades_gracefully_on_empty_linestring_reach() -> None:
+    # hydrofragments.spatial.context's AOI clip does
+    # ``reach.intersection(aoi)``, which returns an empty LineString for a
+    # reach wholly outside the AOI. Before the fix, _linear_parts' is_empty/
+    # Point guard sat AFTER the LineString branch, so an empty LineString
+    # fell into the LineString branch and returned [<LINESTRING EMPTY>] -- a
+    # non-empty list containing a degenerate geometry. Constructed directly
+    # here (no actual AOI clipping needed): a normal upstream reach (1)
+    # flowing into a reach (2) with an empty LineString geometry.
+    #
+    # reach 2's own elevations.size == 0 short-circuits (via `continue`)
+    # before build_rem's per-reach direction-check block ever calls
+    # _line_endpoints on reach 2's OWN geometry -- so this crash needs
+    # reach 2 to be the NextDownID target of reach 1: while processing
+    # reach 1 (upstream, headwater, processed first in topological order),
+    # build_rem calls ``_line_endpoints(downstream_geometry)`` where
+    # downstream_geometry is reach 2's empty LineString. That call
+    # delegates to _linear_parts, which (pre-fix) returned
+    # [<LINESTRING EMPTY>] -- a non-empty list -- bypassing
+    # _line_endpoints' "no parts" guard and crashing with IndexError on
+    # ``parts[0].coords[0]`` (an empty LineString has no coordinates).
+    dem = _linear_dem()
+    normal_line = LineString([(0.0, 285.0), (0.0, 15.0)])
+    drainage = gpd.GeoDataFrame(
+        [
+            _reach(1, normal_line, next_down=2, from_node=1, to_node=2),
+            _reach(2, LineString(), next_down=-1, from_node=2, to_node=3),
+        ],
+        crs="EPSG:3577",
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0, "2": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    # The empty-geometry reach must degrade via the same "no usable
+    # samples" path as a reach with zero DEM coverage, not raise.
+    assert "reach_2_no_dem_samples" in result.degraded_reasons
+    # The normal upstream reach must still be processed and contribute a
+    # finite REM.
+    assert np.any(np.isfinite(result.rem))
+
+
+def test_build_rem_handles_geometrycollection_reach_with_point_and_linestring() -> None:
+    # A multi-part AOI (unary_union of AOI polygons often yields a
+    # MultiPolygon) where a reach crosses one part and only touches another
+    # at a single point produces geometry.intersection(aoi) as a
+    # GeometryCollection containing both a LineString and a Point. Before
+    # the fix, this hit _linear_parts' final
+    # `raise ValueError(f"unsupported reach geometry type: ...")` branch --
+    # a live crash (is_empty is False and .length is positive, so it passes
+    # create_channel_context's existing filters and reaches build_rem).
+    # The Point member must be dropped (via the Point branch when
+    # _linear_parts recurses into it) and only the LineString member used,
+    # producing output identical to a plain-LineString reach.
+    dem = _linear_dem()
+    line = LineString([(0.0, 285.0), (0.0, 15.0)])
+    point = Point(9999.0, 9999.0)  # far outside the DEM/reach; must be dropped, not sampled
+
+    drainage_plain = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+    drainage_collection = gpd.GeoDataFrame(
+        [_reach(1, GeometryCollection([line, point]), next_down=-1, from_node=1, to_node=2)],
+        crs="EPSG:3577",
+    )
+    kwargs = dict(
+        transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0, profile_percentile=50.0,
+        corridor_widths_m={"1": 90.0}, rem_k=4, rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    result_plain = build_rem(drainage_plain, dem, **kwargs)
+    result_collection = build_rem(drainage_collection, dem, **kwargs)
+
+    assert np.allclose(result_plain.rem, result_collection.rem, equal_nan=True)
+    assert result_plain.degraded_reasons == result_collection.degraded_reasons
 
 
 def test_rejects_missing_corridor_widths_entry() -> None:

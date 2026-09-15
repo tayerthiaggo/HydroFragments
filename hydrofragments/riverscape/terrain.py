@@ -43,6 +43,15 @@ def _linear_parts(geometry: Any) -> list[Any]:
     preserve along-stream order, which is why the disjoint-parts fallback
     below always falls back to the original geometry, never to ``merged``.
     """
+    if geometry.is_empty:
+        # A reach clipped down to nothing is zero-length, not an error -- the
+        # caller's existing "no usable samples" degraded-flag path handles an
+        # empty part list the same way it handles a zero-length LineString.
+        # Checked first, before any type dispatch, since an empty geometry
+        # could otherwise report various geom_types (e.g. an empty
+        # LineString would fall into the LineString branch below and return
+        # a non-empty list containing a degenerate geometry).
+        return []
     if geometry.geom_type == "LineString":
         return [geometry]
     if geometry.geom_type == "MultiLineString":
@@ -54,12 +63,21 @@ def _linear_parts(geometry: Any) -> list[Any]:
         # match the input order (GEOS's LineMerge does not preserve it), so
         # fall back to the ORIGINAL geometry's part order, not merged's.
         return list(geometry.geoms)
-    if geometry.is_empty or geometry.geom_type == "Point":
-        # A reach clipped down to nothing (or to a single touching point at
-        # the AOI boundary) is zero-length, not an error -- the caller's
-        # existing "no usable samples" degraded-flag path handles an empty
-        # part list the same way it handles a zero-length LineString.
+    if geometry.geom_type == "Point":
+        # A reach clipped down to a single touching point at the AOI
+        # boundary is zero-length, not an error -- see the is_empty comment
+        # above.
         return []
+    if geometry.geom_type == "GeometryCollection":
+        # A multi-part AOI clip (e.g. a reach crossing one AOI polygon and
+        # only touching another at a single point) can produce a
+        # GeometryCollection mixing a LineString with a Point. Unwrap
+        # recursively and keep only the linear members -- the Point member
+        # is dropped via the Point branch above when we recurse into it.
+        parts: list = []
+        for part in geometry.geoms:
+            parts.extend(_linear_parts(part))
+        return parts
     raise ValueError(f"unsupported reach geometry type: {geometry.geom_type!r}")
 
 
