@@ -101,8 +101,8 @@ MIN_BOUNDARY_CONTACTS = 2
 
 Elongation is the longer side divided by the shorter side of the minimum
 rotated rectangle; the denominator is floored at `pixel_m`. Centreline span
-is the maximum distance between centreline-pixel centres inside the polygon,
-divided by the rectangle's major-axis length. Boundary contacts are distinct
+is the range of centreline-pixel centres projected onto that rectangle's
+major-axis unit vector, divided by the major-axis length. Boundary contacts are distinct
 8-connected groups of centreline pixels that cross between the rasterized
 polygon and its one-pixel exterior ring.
 
@@ -198,7 +198,7 @@ finite and `bare_fraction >= bare_year_fraction`.
 ### 4.3 Other bits and confidence
 
 ```text
-W_high = finite(frequency) and frequency >= f_chan_high
+W_high = finite(frequency) and frequency >= 100 * f_chan_high
 S      = riverine_waterbody_mask
 T      = (REM <= h_chan_m) or (trough_depth >= trough_depth_m)
 C      = in an 8-connected component of (domain and corridor_mask)
@@ -329,6 +329,7 @@ def find_gaps(
     centreline: np.ndarray,
     drainage: geopandas.GeoDataFrame,
     reach_labels: np.ndarray,
+    reach_keys: Mapping[int, str],
     corridor_widths_m: Mapping[str, float],
     *,
     transform: Affine,
@@ -381,7 +382,7 @@ terrain = min(
     clip(max(REM, 0) / bridge_rem_max_m, 0, 1),
     1 - clip(max(trough_depth, 0) / trough_depth_m, 0, 1),
 )
-water = 1 - clip(frequency, 0, 1)          # NaN/non-positive becomes 1
+water = 1 - clip(frequency / 100, 0, 1)    # NaN/non-positive becomes 1
 bare = 1 - clip(bare_fraction, 0, 1)       # NaN becomes 1
 green = 1 - clip(green_pct / 100, 0, 1)   # NaN becomes 1
 npv = 1 - clip(npv_pct / 100, 0, 1)       # NaN becomes 1
@@ -447,6 +448,11 @@ exist. It deterministically samples 100 continuous observed-channel spans,
 300-1800 m long, stratified over `UpstrDArea`. It hides water/domain evidence
 along each held-out span while retaining terrain, FC, and line-distance
 inputs, then routes between the original anchors.
+
+Calibration routes deliberately disable the production hard-protection mask
+so candidate weights can be penalized when they prefer an off-channel body;
+the score measures that crossing against the real off-channel mask. Production
+bridging keeps the hard protection invariant from Section 6.
 
 Candidates are the parent-spec baseline; each of its five non-zero terms
 ablated once; NPV set to 0.5; terrain doubled; water halved; and line distance
