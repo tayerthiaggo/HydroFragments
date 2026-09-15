@@ -36,11 +36,13 @@ def test_corridor_width_reflects_offset_and_water_half_width() -> None:
 
     assert result.degraded_reasons == ()
     width = result.widths_m["1"]
-    # Offset is ~3 px (90 m); water half-width is up to 3 px (90 m) at the
-    # band's centre. Width should exceed the raw offset (accounts for water
-    # half-width too) and stay within the configured ceiling.
-    assert 90.0 < width <= 1200.0
-    assert result.p95_offset_m["1"] > 0.0
+    # Offset is exactly 3 px (90 m): the line sits directly above the
+    # 1-pixel-thick water band, same columns, so every line pixel's
+    # nearest-skeleton distance is exactly 3 px. The water band is only
+    # 1 pixel thick (not 3), so its half-width is 1 px (30 m) -- giving a
+    # deterministic width of 90 + 30 = 120 m for this fixture.
+    assert width == pytest.approx(120.0)
+    assert result.p95_offset_m["1"] == pytest.approx(90.0)
 
 
 def test_reach_with_no_water_seed_gets_max_corridor_and_is_flagged_degraded() -> None:
@@ -70,6 +72,30 @@ def test_corridor_width_never_exceeds_configured_max() -> None:
     )
 
     assert result.widths_m["1"] == 300.0
+    # The raw p95_offset_m + max_half_width_m sum for this fixture is far
+    # beyond 300 m (water is many pixels away from the line), so the clamp
+    # actually reduced the value -- this must be recorded, distinguishing
+    # "measured exactly 300 m" from "measured much more, clamped to 300 m".
+    assert "reach_1_corridor_clamped_max" in result.degraded_reasons
+
+
+def test_corridor_width_naturally_below_max_is_not_flagged_clamped() -> None:
+    # Same fixture as test_corridor_width_reflects_offset_and_water_half_width
+    # (deterministic width 120.0), but with a generous ceiling the raw sum
+    # never approaches -- the clamp must NOT fire just because a ceiling
+    # exists; only an actual reduction should be flagged.
+    water = np.zeros((10, 10), dtype=bool)
+    water[5, 2:8] = True
+    line = LineString([(75.0, 225.0), (225.0, 225.0)])
+    drainage = _drainage(line)
+
+    result = measure_corridor_widths(
+        drainage, water, transform=_TRANSFORM, pixel_m=_PIXEL_M, f_seed=0.05,
+        corridor_min_m=90.0, corridor_max_m=1200.0, alignment_quantile=0.95,
+    )
+
+    assert result.widths_m["1"] == pytest.approx(120.0)
+    assert result.degraded_reasons == ()
 
 
 def test_rejects_missing_hydro_id_column() -> None:

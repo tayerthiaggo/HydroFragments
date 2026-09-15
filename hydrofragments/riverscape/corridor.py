@@ -74,7 +74,13 @@ def measure_corridor_widths(
     where this reach's line is closest to it. A reach with no water-seed
     pixels anywhere on the grid gets ``corridor_max_m`` directly (maximally
     permissive search space, since there is nothing yet to conflate the
-    line against) and is recorded in ``degraded_reasons``.
+    line against) and is recorded in ``degraded_reasons``. A reach whose
+    raw ``p95_offset_m + max_half_width_m`` exceeds ``corridor_max_m`` is
+    clamped down to the ceiling AND recorded in ``degraded_reasons`` as
+    ``f"reach_{key}_corridor_clamped_max"`` -- so a caller can tell "measured
+    exactly at the ceiling" from "measured far beyond it and clamped" (the
+    symmetric ``corridor_min_m`` floor case is not flagged; a reach simply
+    below the ceiling to begin with is not flagged either).
     """
     if drainage.empty:
         raise ValueError("drainage must contain at least one feature")
@@ -123,7 +129,10 @@ def measure_corridor_widths(
         p95_offset_m = float(np.percentile(offsets_px, alignment_quantile * 100.0)) * pixel_m
         max_half_width_m = float(np.max(half_widths_px)) * pixel_m
 
-        width_m = min(max(p95_offset_m + max_half_width_m, corridor_min_m), corridor_max_m)
+        raw_width_m = p95_offset_m + max_half_width_m
+        width_m = min(max(raw_width_m, corridor_min_m), corridor_max_m)
+        if raw_width_m > corridor_max_m:
+            degraded.append(f"reach_{key}_corridor_clamped_max")
         widths[key] = width_m
         offsets[key] = p95_offset_m
 
