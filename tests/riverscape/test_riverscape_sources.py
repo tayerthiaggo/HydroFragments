@@ -135,8 +135,12 @@ def test_load_fc_percentiles_forwards_years_as_datetime_filter_to_search(monkeyp
     )
 
     datetime_filter = search_captured["search_kwargs"]["datetime"]
-    assert "2019" in datetime_filter
-    assert "2021" in datetime_filter
+    # Exact string, not a substring check -- a year-swap mutant (e.g.
+    # start/end reversed, or a wrong separator) survives a substring
+    # assertion like `"2019" in datetime_filter and "2021" in
+    # datetime_filter` since both years still appear somewhere in a mangled
+    # string.
+    assert datetime_filter == "2019-01-01/2021-12-31"
 
 
 def test_load_dem_raises_riverscape_source_unavailable_when_all_stac_urls_fail(

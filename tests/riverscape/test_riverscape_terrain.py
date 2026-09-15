@@ -185,6 +185,63 @@ def test_build_rem_handles_multilinestring_reach_without_crashing() -> None:
     assert np.isfinite(result.rem[12, 5])
 
 
+def test_multilinestring_disjoint_parts_processed_in_original_geometry_order() -> None:
+    # Regression test for the reordering bug: _linear_parts used to fall
+    # back to `list(merged.geoms)` for a genuinely-disjoint MultiLineString
+    # (parts that don't share an endpoint, so linemerge can't stitch them
+    # into one LineString -- the routine shape of an AOI-clipped reach with
+    # a hole in the middle). GEOS's LineMerge does NOT preserve input part
+    # order, so `merged.geoms` can silently REVERSE (or otherwise reorder)
+    # the along-stream sequence versus the original `geometry.geoms` order
+    # (which IS preserved, since this geometry -- like a real
+    # `intersection()` clip result -- was built with part_a upstream,
+    # part_b downstream).
+    #
+    # Confirmed empirically for this exact fixture: `list(linemerge(geom
+    # ).geoms)` returns part_b (the downstream part) FIRST and part_a
+    # (upstream) SECOND -- the reverse of `geometry.geoms` order.
+    #
+    # part_a (rows 0-3) sits upstream on a monotonically-declining DEM
+    # (higher elevation); part_b (rows 10-13, disjoint gap at rows 4-9,
+    # mimicking an AOI hole) sits downstream (lower elevation). Correctly
+    # ordered, the sampled elevation sequence is already non-increasing
+    # (~196 down to ~175) so PAVA leaves it essentially unchanged. If the
+    # parts were fed to PAVA in the WRONG (reversed) order, the sequence
+    # would look like it INCREASES downstream, which a non-increasing PAVA
+    # constraint pools into a single flat block at the overall mean
+    # (~186.17) -- destroying the real ~21 m upstream/downstream decline.
+    dem = _linear_dem(shape=(20, 10), slope_per_row=2.0, base=200.0)
+    part_a = LineString([(150.0, _y(0)), (150.0, _y(3))])
+    part_b = LineString([(150.0, _y(10)), (150.0, _y(13))])  # disjoint gap: rows 4-9
+    geometry = MultiLineString([part_a, part_b])
+
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, geometry, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+
+    # rem_k=1 (pure nearest-neighbor) makes the reconstructed profile at
+    # each pixel exactly equal to its nearest profile point's regressed
+    # elevation -- no blending across neighbors -- so the expected values
+    # below are exact, not approximate.
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=1,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    profile_upstream = float(dem[0, 5] - result.rem[0, 5])
+    profile_downstream = float(dem[13, 5] - result.rem[13, 5])
+
+    # Correctly ordered: profile_upstream == 196.0, profile_downstream ==
+    # 175.0 (measured exactly, matching the unperturbed sampled elevations
+    # since the true along-stream sequence is already non-increasing).
+    # Reordered (the bug): both collapse to the pooled mean 186.1667, so
+    # profile_upstream == profile_downstream and this assertion fails.
+    assert profile_upstream == pytest.approx(196.0)
+    assert profile_downstream == pytest.approx(175.0)
+    assert profile_upstream - profile_downstream > 15.0
+
+
 def test_build_rem_handles_linemerge_mergeable_multilinestring() -> None:
     # A MultiLineString whose two parts DO share an endpoint -- the common
     # case from an AOI-boundary clip splitting one continuous reach into
@@ -207,6 +264,50 @@ def test_build_rem_handles_linemerge_mergeable_multilinestring() -> None:
 
     assert np.isfinite(result.rem[2, 5])
     assert np.isfinite(result.rem[12, 5])
+
+
+def test_sample_buffer_uses_full_corridor_width_not_half() -> None:
+    # Regression test for the radius/diameter fix: build_rem samples each
+    # reach's elevation bins with `buffer_m=max(width_m, pixel_m)` (the
+    # corridor width used directly as a buffer radius), NOT
+    # `max(width_m / 2.0, pixel_m)`. Every OTHER fixture in this file is
+    # laterally uniform (same elevation across all columns), so the two
+    # formulas sample identical pixel values and a mutant reverting to
+    # `/ 2.0` survives unnoticed. This fixture varies elevation ACROSS
+    # COLUMNS (a near band at cols 4-6 = 100.0, a far band everywhere else
+    # = 900.0) so a buffer_m of 80.0 (correct, corridor_widths_m={"1": 80.0})
+    # reaches the far band at row 1's bin, while a buffer_m of 40.0 (the
+    # `/ 2.0` mutant) does not.
+    #
+    # The reach line runs from (165, 300) to (165, 0) -- x=165 is column
+    # 5's pixel center, and the line's start at y=300 (the grid's top edge,
+    # not row 0's pixel center) makes each 30 m bin's midpoint land exactly
+    # on a pixel row center, so profile points coincide exactly with pixel
+    # centers and rem_k=1 gives an exact (not blended) nearest-neighbor
+    # reconstruction.
+    dem = np.full((10, 10), 900.0, dtype="float32")
+    dem[:, 4:7] = 100.0  # near band directly under/around the line
+
+    line = LineString([(165.0, 300.0), (165.0, 0.0)])
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 80.0}, rem_k=1,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    # Measured with the real (unmutated) code: REM[1, 5] == -600.0 (a
+    # buffer_m of 80.0 reaches column 3's far-band pixel at this bin,
+    # pulling the regressed profile well above the local DEM value of
+    # 100.0). Under the `/ 2.0` mutant (buffer_m == 40.0, verified by
+    # calling build_rem with corridor_widths_m={"1": 40.0} -- which
+    # reproduces max(80.0 / 2.0, pixel_m) exactly), REM[1, 5] == 0.0: the
+    # far band is never reached, so the profile exactly matches the local
+    # DEM and the lateral contamination this test is checking for vanishes.
+    assert result.rem[1, 5] == pytest.approx(-600.0)
 
 
 def test_rejects_missing_corridor_widths_entry() -> None:

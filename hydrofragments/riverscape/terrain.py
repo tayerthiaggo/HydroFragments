@@ -34,8 +34,14 @@ def _linear_parts(geometry: Any) -> list[Any]:
     stitches them back into one continuous ``LineString``, restoring a
     single along-stream distance axis. If linemerge still returns a
     ``MultiLineString`` (the parts are genuinely disjoint, no shared
-    endpoints), each part is kept separately, in ``geometry.geoms`` order,
-    for the caller to sample/measure independently.
+    endpoints), each part is kept separately, in the ORIGINAL ``geometry``'s
+    part order (``geometry.geoms``), NOT ``linemerge``'s output order --
+    GEOS's ``LineMerge`` does not preserve input part order, so reading
+    ``merged.geoms`` here can silently reverse (or otherwise reorder) the
+    along-stream sequence for a disjoint (e.g. AOI-hole-clipped) reach.
+    ``geometry.geoms`` (as produced by shapely's ``intersection()``) DOES
+    preserve along-stream order, which is why the disjoint-parts fallback
+    below always falls back to the original geometry, never to ``merged``.
     """
     if geometry.geom_type == "LineString":
         return [geometry]
@@ -43,7 +49,17 @@ def _linear_parts(geometry: Any) -> list[Any]:
         merged = linemerge(geometry)
         if merged.geom_type == "LineString":
             return [merged]
-        return list(merged.geoms)
+        # linemerge could not fully stitch the parts (genuinely disjoint,
+        # e.g. an AOI-clip hole) -- merged.geoms' order is NOT guaranteed to
+        # match the input order (GEOS's LineMerge does not preserve it), so
+        # fall back to the ORIGINAL geometry's part order, not merged's.
+        return list(geometry.geoms)
+    if geometry.is_empty or geometry.geom_type == "Point":
+        # A reach clipped down to nothing (or to a single touching point at
+        # the AOI boundary) is zero-length, not an error -- the caller's
+        # existing "no usable samples" degraded-flag path handles an empty
+        # part list the same way it handles a zero-length LineString.
+        return []
     raise ValueError(f"unsupported reach geometry type: {geometry.geom_type!r}")
 
 
@@ -53,12 +69,19 @@ def _line_endpoints(geometry: Any) -> tuple[tuple[float, float], tuple[float, fl
     Delegates to ``_linear_parts`` so a mergeable ``MultiLineString`` yields
     the same endpoints as its merged ``LineString`` would. For a genuinely
     disjoint ``MultiLineString``, this uses the first coordinate of the
-    first part and the last coordinate of the last part (in geometry
-    order) as the effective endpoints -- an approximation, since disjoint
-    parts have no single well-defined direction, but sufficient for this
-    diagnostic-only direction check (it must never crash, not be exact).
+    first part and the last coordinate of the last part (in the ORIGINAL
+    geometry's part order -- see ``_linear_parts``) as the effective
+    endpoints -- an approximation, since disjoint parts have no single
+    well-defined direction, but sufficient for this diagnostic-only
+    direction check (it must never crash, not be exact). A zero-length/
+    non-linear ``geometry`` (``_linear_parts`` returns ``[]``) has no
+    endpoints at all; ``(nan, nan)`` is returned for both so the caller's
+    proximity comparison simply evaluates to ``False`` instead of raising.
     """
     parts = _linear_parts(geometry)
+    if not parts:
+        nan_point = (float("nan"), float("nan"))
+        return nan_point, nan_point
     return parts[0].coords[0], parts[-1].coords[-1]
 
 

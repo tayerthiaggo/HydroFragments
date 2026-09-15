@@ -98,6 +98,30 @@ def test_corridor_width_naturally_below_max_is_not_flagged_clamped() -> None:
     assert result.degraded_reasons == ()
 
 
+def test_corridor_width_exactly_at_ceiling_is_not_flagged_clamped() -> None:
+    # Same deterministic-120.0 fixture as
+    # test_corridor_width_reflects_offset_and_water_half_width, but with
+    # corridor_max_m set to EXACTLY 120.0 -- the raw measured width sits
+    # AT the ceiling, not beyond it, so this must NOT be flagged clamped.
+    # A mutant that changes the clamp condition from `raw_width_m >
+    # corridor_max_m` to `width_m >= corridor_max_m` would incorrectly flag
+    # this case (width_m == corridor_max_m == 120.0 satisfies `>=`), so this
+    # test discriminates the two conditions where the other clamp tests
+    # (whose raw values are far from the ceiling) cannot.
+    water = np.zeros((10, 10), dtype=bool)
+    water[5, 2:8] = True
+    line = LineString([(75.0, 225.0), (225.0, 225.0)])
+    drainage = _drainage(line)
+
+    result = measure_corridor_widths(
+        drainage, water, transform=_TRANSFORM, pixel_m=_PIXEL_M, f_seed=0.05,
+        corridor_min_m=90.0, corridor_max_m=120.0, alignment_quantile=0.95,
+    )
+
+    assert result.widths_m["1"] == pytest.approx(120.0)
+    assert result.degraded_reasons == ()
+
+
 def test_rejects_missing_hydro_id_column() -> None:
     drainage = gpd.GeoDataFrame(
         {"geometry": [LineString([(0.0, 0.0), (100.0, 100.0)])]}, crs="EPSG:3577"
