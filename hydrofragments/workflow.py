@@ -26,6 +26,12 @@ Phase timings recorded in the run manifest's ``timings_seconds``:
 - ``output_write``: atomic bundle finalization (tables, spatial products,
   validated manifest).
 - ``total``: wall-clock sum of the four phases above.
+
+``hydrofragments.io.riverscape_sources`` is a deliberate, documented
+exception to this module's DEA-access boundary (see that module's and
+``io/dea.py``'s docstrings) -- it owns STAC/WFS access for riverscape
+zoning's terrain, cover, and waterbody evidence directly, since hydroseason
+has no equivalent loader for them.
 """
 from __future__ import annotations
 

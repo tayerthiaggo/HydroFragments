@@ -14,6 +14,12 @@ This module does NOT build zones and does NOT reduce statistics into a
 planning mask (``WetPlanningFootprint`` / ``build_wet_planning_footprint``)
 -- both are later tasks. It only adapts one loaded Dataset into one
 dataclass.
+
+``hydrofragments.io.riverscape_sources`` is a deliberate exception to this
+module's "hydroseason owns STAC access" boundary: riverscape zoning's DEM,
+Fractional Cover, and DEA Waterbodies inputs have no hydroseason equivalent,
+so that module owns direct ``pystac-client``/``odc.stac`` access for them.
+This module's own DEA WO Statistics loader is unaffected.
 """
 from __future__ import annotations
 
