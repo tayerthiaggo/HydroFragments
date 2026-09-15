@@ -22,6 +22,7 @@ from typing import Any, Mapping, Sequence
 
 import geopandas as gpd
 import odc.stac
+import pyogrio
 import pystac_client
 import xarray as xr
 from shapely.geometry import box
@@ -58,7 +59,27 @@ def _search(collection: str, bbox: Sequence[float], *, time_range: str | None = 
 
 
 def _reduce_time(data: xr.DataArray) -> xr.DataArray:
-    return data.median("time") if "time" in data.dims else data
+    """Reduce a ``time`` dimension by median, masking nodata first.
+
+    Integer bands (e.g. DEA Fractional Cover's uint8 percentile bands,
+    nodata=255) commonly arrive with the raw sentinel value rather than
+    NaN filling gaps, so an unmasked median would pull the multi-year
+    composite toward that sentinel wherever any year is missing data.
+    ``data.attrs["nodata"]`` (the convention ``odc.stac``-loaded arrays
+    populate) is checked first; ``.odc.nodata`` (the odc-geo accessor,
+    registered as a side effect of importing ``odc.stac``) is a fallback
+    for arrays that expose it only via that route. Arrays with no ``time``
+    dimension (e.g. DEM bands) pass through unchanged -- there is nothing
+    to reduce, so masking would be a no-op at best.
+    """
+    if "time" not in data.dims:
+        return data
+    nodata = data.attrs.get("nodata")
+    if nodata is None:
+        nodata = data.odc.nodata
+    if nodata is not None:
+        data = data.where(data != nodata)
+    return data.median("time", skipna=True)
 
 
 def load_dem(geobox: Any, *, product: str, band: str) -> xr.DataArray:
@@ -73,9 +94,16 @@ def load_dem(geobox: Any, *, product: str, band: str) -> xr.DataArray:
     """
     bbox_ll = list(geobox.extent.to_crs("EPSG:4326").boundingbox)
     items = _search(product, bbox_ll)
-    dataset = odc.stac.load(items, bands=[band], geobox=geobox, resampling="bilinear")
-    if band not in dataset:
-        raise RiverscapeSourceUnavailable(f"{product} item(s) missing band {band!r}")
+    try:
+        dataset = odc.stac.load(items, bands=[band], geobox=geobox, resampling="bilinear")
+        if band not in dataset:
+            raise RiverscapeSourceUnavailable(f"{product} item(s) missing band {band!r}")
+    except RiverscapeSourceUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- fold every read failure into one contract
+        raise RiverscapeSourceUnavailable(
+            f"{product} band {band!r} read failed: {type(exc).__name__}: {exc}"
+        ) from exc
     return _reduce_time(dataset[band])
 
 
@@ -99,9 +127,16 @@ def load_fc_percentiles(
 
     result: dict[str, xr.DataArray] = {}
     for band in bands:
-        dataset = odc.stac.load(items, bands=[band], geobox=geobox, resampling="nearest")
-        if band not in dataset:
-            raise RiverscapeSourceUnavailable(f"{product} item(s) missing band {band!r}")
+        try:
+            dataset = odc.stac.load(items, bands=[band], geobox=geobox, resampling="nearest")
+            if band not in dataset:
+                raise RiverscapeSourceUnavailable(f"{product} item(s) missing band {band!r}")
+        except RiverscapeSourceUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- fold every read failure into one contract
+            raise RiverscapeSourceUnavailable(
+                f"{product} band {band!r} read failed: {type(exc).__name__}: {exc}"
+            ) from exc
         result[band] = _reduce_time(dataset[band])
     return result
 
@@ -117,25 +152,38 @@ def load_waterbodies(
     URL. Uses GDAL's ``WFS:`` driver prefix with a native ``bbox=`` filter
     (the same bbox-pushdown idiom ``scripts/spikes/widen_fitzroy_aoi.py``
     uses for a local geodatabase), so both routes share one code path.
-    An empty result (no waterbodies in the AOI) is a valid, non-error
-    outcome and is returned as an empty GeoDataFrame, not raised.
+    ``pyogrio``'s ``bbox=`` filter is applied in the dataset's own native
+    CRS, not necessarily EPSG:4326 -- the layer's actual CRS is looked up
+    first via ``pyogrio.read_info`` and ``bounds`` is reprojected into
+    *that* CRS before being used as the filter, so this is correct even if
+    the WFS layer's native CRS isn't 4326 (a bbox left in the wrong CRS
+    would silently return zero features instead of raising). An empty
+    result (no waterbodies in the AOI) is a valid, non-error outcome and is
+    returned as an empty GeoDataFrame -- always reprojected to ``crs``, the
+    same as a non-empty result, so callers never observe the CRS varying
+    with feature count.
     """
     wfs_url = source or WATERBODIES_WFS_URL
-    bounds_ll = tuple(
-        gpd.GeoSeries([box(*bounds)], crs=crs).to_crs("EPSG:4326").total_bounds
+    try:
+        layer_info = pyogrio.read_info(f"WFS:{wfs_url}", layer=WATERBODIES_TYPENAME)
+    except Exception as exc:  # noqa: BLE001
+        raise RiverscapeSourceUnavailable(
+            f"DEA Waterbodies unavailable: {type(exc).__name__}: {exc}"
+        ) from exc
+    layer_crs = layer_info.get("crs") or "EPSG:4326"
+    bounds_layer_crs = tuple(
+        gpd.GeoSeries([box(*bounds)], crs=crs).to_crs(layer_crs).total_bounds
     )
     try:
         polygons = gpd.read_file(
-            f"WFS:{wfs_url}", layer=WATERBODIES_TYPENAME, bbox=bounds_ll, engine="pyogrio"
+            f"WFS:{wfs_url}", layer=WATERBODIES_TYPENAME, bbox=bounds_layer_crs, engine="pyogrio"
         )
     except Exception as exc:  # noqa: BLE001
         raise RiverscapeSourceUnavailable(
             f"DEA Waterbodies unavailable: {type(exc).__name__}: {exc}"
         ) from exc
-    if polygons.empty:
-        return polygons
     if polygons.crs is None:
-        polygons = polygons.set_crs("EPSG:4326", allow_override=True)
+        polygons = polygons.set_crs(layer_crs, allow_override=True)
     return polygons.to_crs(crs)
 
 
