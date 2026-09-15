@@ -33,6 +33,7 @@ def test_offset_line_still_conflates_onto_the_true_water_skeleton() -> None:
     )
 
     assert result.line_fallback_reaches == ()
+    assert result.multithread_reaches == ()
     # The conflated skeleton must sit ON the water band (row 5), never on
     # the offset line's own row (row 2).
     assert result.skeleton[5, :].any()
@@ -89,8 +90,32 @@ def test_corridor_restricts_which_water_contributes_to_the_skeleton() -> None:
         drainage, water, {"1": 45.0}, transform=_TRANSFORM, pixel_m=30.0
     )
 
+    assert result.multithread_reaches == ()
     assert result.skeleton[2, :].any()
     assert not result.skeleton[7, :].any()
+
+
+def test_sinuous_single_thread_channel_is_not_flagged_multithread() -> None:
+    # A single 90-degree channel bend: a vertical arm (rows 1-7, cols 2-4)
+    # meeting a horizontal arm (rows 5-7, cols 2-8) -- an ordinary channel
+    # corner, not an enclosed loop. Its medial-axis skeleton contains an
+    # L-tromino corner motif (three mutually 8-adjacent pixels), which is
+    # exactly the shape the old Euler-characteristic cycle check misread
+    # as a 3-cycle (verified: reverting _has_loop to that check flags this
+    # reach multithread). The corridor-restricted water mask has no
+    # enclosed hole, so the current implementation must not flag it.
+    water = np.zeros((10, 10), dtype=bool)
+    water[1:8, 2:5] = True
+    water[5:8, 2:9] = True
+    line = LineString([(30.0, 150.0), (270.0, 150.0)])
+    drainage = _drainage(line)
+
+    result = build_centreline(
+        drainage, water, {"1": 300.0}, transform=_TRANSFORM, pixel_m=30.0
+    )
+
+    assert result.multithread_reaches == ()
+    assert result.skeleton.any()
 
 
 def test_reach_whose_own_corridor_excludes_all_nearby_water_is_line_fallback() -> None:

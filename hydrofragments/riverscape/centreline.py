@@ -30,12 +30,13 @@ def _has_loop(mask: np.ndarray) -> bool:
     A genuine loop (water splits and rejoins around dry land) encloses a
     hole in the water body -- detected as more than one connected
     component in the mask's background (4-connectivity), after padding by
-    one pixel so the grid edge itself never counts as an enclosure. This
-    replaces an earlier pixel-graph cycle check that false-positived on
-    ordinary channel corners (any 8-adjacent L-shaped triple is a 3-cycle
-    in that graph despite representing no real loop -- verified to fire on
-    a plain sinuous single-thread channel with zero enclosed holes).
+    one pixel so the grid edge itself never counts as an enclosure.
+    Background connectivity must be 4-connected to correctly pair with the
+    8-connected foreground: an 8-connected background check would let a
+    diagonal-only gap "leak" through a corner, wrongly merging what should
+    be two separate background regions and missing a real enclosure.
     """
+    mask = np.asarray(mask, dtype=bool)
     if not mask.any():
         return False
     background = ~np.pad(mask, 1, mode="constant", constant_values=False)
@@ -60,9 +61,10 @@ def build_centreline(
     own corridor) are left open here and resolved by gap bridging (spec
     §4.2 step 5, a later plan) -- such a reach is flagged ``line_fallback``:
     its AHGF line remains a topology/profile guide only and never becomes
-    channel. A reach whose restricted skeleton contains a cycle (loop) is
-    flagged ``multithread`` but still contributes its skeleton pixels --
-    multithread (anabranching) channels are a real landform, not an error.
+    channel. A reach whose corridor-restricted water mask encloses an
+    island (a real anabranch loop) is flagged ``multithread`` but still
+    contributes its skeleton pixels -- multithread (anabranching) channels
+    are a real landform, not an error.
 
     ``drainage`` must carry a unique ``HydroID`` column; this function does
     not validate drainage topology (see
