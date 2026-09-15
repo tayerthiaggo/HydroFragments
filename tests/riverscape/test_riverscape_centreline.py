@@ -67,6 +67,48 @@ def test_looped_water_body_is_flagged_multithread() -> None:
     )
 
     assert result.multithread_reaches == ("1",)
+    # Flagged multithread but still contributes its pixels to the combined
+    # skeleton, per the spec's "flagged but still contributes" contract.
+    assert result.skeleton.any()
+
+
+def test_corridor_restricts_which_water_contributes_to_the_skeleton() -> None:
+    # Water in two separate bands: row 2 (near) and row 7 (far). The
+    # reach's line runs along row 2 -- pixel-center y = 300 - 30*(2+0.5) =
+    # 225 -- with a narrow 45 m corridor: wide enough to reach row 2's
+    # water (the line sits inside that row's pixel extent, y in
+    # [210, 240]) but far short of row 7's water (y in [60, 90], 135-165 m
+    # away), so the corridor intersection actually excludes something.
+    water = np.zeros((10, 10), dtype=bool)
+    water[2, 1:9] = True
+    water[7, 1:9] = True
+    line = LineString([(45.0, 225.0), (255.0, 225.0)])
+    drainage = _drainage(line)
+
+    result = build_centreline(
+        drainage, water, {"1": 45.0}, transform=_TRANSFORM, pixel_m=30.0
+    )
+
+    assert result.skeleton[2, :].any()
+    assert not result.skeleton[7, :].any()
+
+
+def test_reach_whose_own_corridor_excludes_all_nearby_water_is_line_fallback() -> None:
+    # Water exists on the grid (row 2) -- unlike the "no water anywhere"
+    # fallback test above -- but this reach's own line+corridor sits far
+    # away (row 7, pixel-center y = 75) with a narrow 30 m corridor that
+    # never reaches row 2's water 150 m away, so this reach's restricted
+    # mask is empty even though the grid isn't.
+    water = np.zeros((10, 10), dtype=bool)
+    water[2, 1:9] = True
+    line = LineString([(45.0, 75.0), (255.0, 75.0)])
+    drainage = _drainage(line)
+
+    result = build_centreline(
+        drainage, water, {"1": 30.0}, transform=_TRANSFORM, pixel_m=30.0
+    )
+
+    assert result.line_fallback_reaches == ("1",)
 
 
 def test_rejects_missing_corridor_width_entry() -> None:

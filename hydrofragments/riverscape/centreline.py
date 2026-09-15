@@ -24,29 +24,23 @@ class CentrelineResult:
     multithread_reaches: tuple[str, ...]
 
 
-def _has_loop(skeleton: np.ndarray) -> bool:
-    """True if ``skeleton``'s 8-connected pixel graph contains a cycle.
+def _has_loop(mask: np.ndarray) -> bool:
+    """True if ``mask`` encloses at least one island (a real anabranch loop).
 
-    Euler-formula check: for a forest (no cycles), pixels - edges ==
-    components; a cycle reduces that by (at least) one per independent
-    loop, so any mismatch flags a loop. Edges are counted once per
-    unordered adjacent pair via four fixed offset directions (right,
-    down, down-right, down-left), which together with their mirror
-    images cover all 8-connectivity without double-counting.
+    A genuine loop (water splits and rejoins around dry land) encloses a
+    hole in the water body -- detected as more than one connected
+    component in the mask's background (4-connectivity), after padding by
+    one pixel so the grid edge itself never counts as an enclosure. This
+    replaces an earlier pixel-graph cycle check that false-positived on
+    ordinary channel corners (any 8-adjacent L-shaped triple is a 3-cycle
+    in that graph despite representing no real loop -- verified to fire on
+    a plain sinuous single-thread channel with zero enclosed holes).
     """
-    if not skeleton.any():
+    if not mask.any():
         return False
-    structure = np.ones((3, 3), dtype=bool)
-    _, n_components = ndimage.label(skeleton, structure=structure)
-    n_pixels = int(skeleton.sum())
-
-    padded = np.pad(skeleton, 1, mode="constant", constant_values=False)
-    n_edges = 0
-    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
-        shifted = padded[1 + dy : 1 + dy + skeleton.shape[0], 1 + dx : 1 + dx + skeleton.shape[1]]
-        n_edges += int(np.sum(skeleton & shifted))
-
-    return (n_pixels - n_edges) != n_components
+    background = ~np.pad(mask, 1, mode="constant", constant_values=False)
+    _, n_background_components = ndimage.label(background)
+    return n_background_components > 1
 
 
 def build_centreline(
@@ -106,7 +100,7 @@ def build_centreline(
             continue
 
         reach_skeleton = medial_axis(restricted)
-        if _has_loop(reach_skeleton):
+        if _has_loop(restricted):
             multithread.append(key)
         combined |= reach_skeleton
 
