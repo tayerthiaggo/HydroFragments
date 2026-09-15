@@ -30,6 +30,7 @@ dependencies = [
   "odc-stac>=0.3",
   "pandas>=2.2",
   "pyarrow>=15.0",
+  "pyogrio>=0.7",
   "pyproj>=3.6",
   "pystac-client>=0.7",
   "rasterio>=1.3",
