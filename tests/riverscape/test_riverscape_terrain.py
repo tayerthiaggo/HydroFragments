@@ -13,7 +13,7 @@ import pytest
 
 gpd = pytest.importorskip("geopandas")
 from affine import Affine
-from shapely.geometry import LineString
+from shapely.geometry import LineString, MultiLineString
 
 from hydrofragments.riverscape.terrain import build_rem
 
@@ -146,6 +146,166 @@ def test_reversed_reach_is_flagged_geometry_direction_suspect() -> None:
     )
 
     assert "reach_2_geometry_direction_suspect" in result.degraded_reasons
+
+
+def _y(row: int) -> float:
+    """Pixel-center y for ``row`` under ``_TRANSFORM``."""
+    return 300.0 - _PIXEL_M * (row + 0.5)
+
+
+def test_build_rem_handles_multilinestring_reach_without_crashing() -> None:
+    # hydrofragments.spatial.context.create_channel_context clips drainage
+    # to the AOI via geometry.intersection(aoi_geometry), which routinely
+    # turns a reach crossing the AOI boundary into a MultiLineString --
+    # explicitly listed as valid drainage geometry
+    # (hydrofragments/spatial/context.py's _LINE_TYPES). Before the fix,
+    # shapely.ops.substring() in _sample_bin_elevations raised
+    # GeometryTypeError on a MultiLineString; this fixture uses two
+    # disjoint segments (no shared endpoint, so linemerge cannot stitch
+    # them back into one LineString) to exercise the genuinely-disjoint
+    # fallback path, not just the mergeable one.
+    dem = _linear_dem(shape=(20, 10), slope_per_row=1.0, base=100.0)
+    part_a = LineString([(150.0, _y(0)), (150.0, _y(3))])
+    part_b = LineString([(150.0, _y(10)), (150.0, _y(13))])  # disjoint gap: rows 4-9
+    geometry = MultiLineString([part_a, part_b])
+
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, geometry, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    # Must not have crashed, and must produce finite REM at the reach's
+    # own location (both parts).
+    assert np.isfinite(result.rem[2, 5])
+    assert np.isfinite(result.rem[12, 5])
+
+
+def test_build_rem_handles_linemerge_mergeable_multilinestring() -> None:
+    # A MultiLineString whose two parts DO share an endpoint -- the common
+    # case from an AOI-boundary clip splitting one continuous reach into
+    # two touching pieces. linemerge should stitch these back into a
+    # single LineString, preserving one continuous along-stream axis.
+    dem = _linear_dem(shape=(20, 10), slope_per_row=1.0, base=100.0)
+    part_a = LineString([(150.0, _y(0)), (150.0, _y(6))])
+    part_b = LineString([(150.0, _y(6)), (150.0, _y(13))])  # shares (150, _y(6)) with part_a
+    geometry = MultiLineString([part_a, part_b])
+
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, geometry, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    assert np.isfinite(result.rem[2, 5])
+    assert np.isfinite(result.rem[12, 5])
+
+
+def test_rejects_missing_corridor_widths_entry() -> None:
+    # Mirrors build_centreline's identical contract
+    # (test_rejects_missing_corridor_width_entry in
+    # test_riverscape_centreline.py): a reach's HydroID missing from
+    # corridor_widths_m must raise, not silently fall back to
+    # profile_bin_m (a bin LENGTH, not a corridor WIDTH).
+    line = LineString([(0.0, 285.0), (0.0, 15.0)])
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+    with pytest.raises(ValueError, match="corridor_widths_m"):
+        build_rem(
+            drainage, _linear_dem(), transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+            profile_percentile=50.0, corridor_widths_m={}, rem_k=4,
+            rem_max_distance_m=500.0, trough_radius_m=60.0,
+        )
+
+
+def test_pava_enforces_non_increasing_profile_downstream() -> None:
+    # Discrimination test for PAVA's monotone direction: build_rem calls
+    # isotonic_regression(elevations, increasing=False). Flipping that to
+    # increasing=True leaves every other test in this file green (they
+    # only check bounds), because it silently collapses a genuinely
+    # decreasing profile into one flat pooled block (the isotonic solution
+    # under a non-decreasing constraint for a strictly decreasing input is
+    # a single block equal to the overall mean) -- this test's assertion on
+    # the SIZE of the downstream decrease is what catches that: a flat
+    # (mutated) profile has ~0 decrease per step, while the correct
+    # non-increasing regression tracks the DEM's real ~8 m/step decline.
+    dem = _linear_dem(shape=(20, 10), slope_per_row=2.0, base=200.0)
+    line = LineString([(150.0, _y(0)), (150.0, _y(19))])
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+
+    result = build_rem(
+        drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    # Reconstruct the regressed along-stream profile at the reach's column
+    # (col 5) by subtracting REM back out of the DEM, sampled at rows well
+    # inside the reach (away from the k-NN interpolation smoothing that can
+    # occur right at the ends).
+    col = 5
+    rows_to_check = [2, 6, 10, 14, 18]
+    profile = dem[rows_to_check, col] - result.rem[rows_to_check, col]
+    diffs = np.diff(profile)
+
+    # Correct (increasing=False): profile tracks the DEM's ~8 m/step
+    # decline downstream. Mutated (increasing=True): profile collapses
+    # to one flat pooled value, diffs ~0. A mean-per-step decrease of at
+    # least 3 m clears that gap with margin.
+    assert np.mean(diffs) < -3.0, f"profile not decreasing meaningfully downstream: {profile}"
+    assert np.all(diffs <= 0.0), f"profile increased somewhere downstream: {profile}"
+
+
+def test_trough_depth_and_slope_deg_are_finite_correct_shape_and_responsive() -> None:
+    # Neither trough_depth nor slope_deg has any assertion elsewhere in
+    # this file.
+    line = LineString([(0.0, 285.0), (0.0, 15.0)])
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+    common_kwargs = dict(
+        transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0, profile_percentile=50.0,
+        corridor_widths_m={"1": 90.0}, rem_k=4, rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+
+    # A perfectly flat DEM: trough_depth (local_mean - dem) and slope_deg
+    # (from np.gradient) should both be ~0 everywhere.
+    flat = np.full((10, 10), 100.0, dtype="float32")
+    result_flat = build_rem(drainage, flat, **common_kwargs)
+
+    assert result_flat.trough_depth.shape == flat.shape
+    assert result_flat.slope_deg.shape == flat.shape
+    assert np.all(np.isfinite(result_flat.trough_depth))
+    assert np.all(np.isfinite(result_flat.slope_deg))
+    assert np.allclose(result_flat.trough_depth, 0.0, atol=1e-2)
+    assert np.allclose(result_flat.slope_deg, 0.0, atol=1e-2)
+
+    # An artificial depression at the centre: trough_depth there must be
+    # meaningfully nonzero (local mean pulled above the pit).
+    depressed = flat.copy()
+    depressed[5, 5] -= 20.0
+    result_pit = build_rem(drainage, depressed, **common_kwargs)
+    assert result_pit.trough_depth[5, 5] > 1.0
+
+    # A DEM with a known constant gradient: slope_deg must match
+    # atan(gradient) in degrees.
+    gradient = 0.5  # metres of rise per metre of run
+    rows = np.arange(10, dtype="float32")[:, None]
+    graded = (100.0 - rows * gradient * _PIXEL_M) * np.ones((10, 10), dtype="float32")
+    result_grad = build_rem(drainage, graded, **common_kwargs)
+    expected_slope_deg = np.degrees(np.arctan(gradient))
+    assert result_grad.slope_deg[2:-2, 2:-2] == pytest.approx(expected_slope_deg, abs=1e-2)
 
 
 def test_rejects_missing_drainage_topology_columns() -> None:

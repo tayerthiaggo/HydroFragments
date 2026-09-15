@@ -17,9 +17,49 @@ from rasterio.features import rasterize
 from scipy import ndimage
 from scipy.optimize import isotonic_regression
 from scipy.spatial import cKDTree
-from shapely.ops import substring
+from shapely.ops import linemerge, substring
 
 _REQUIRED_COLUMNS = ("HydroID", "From_Node", "To_Node", "NextDownID")
+
+
+def _linear_parts(geometry: Any) -> list[Any]:
+    """Return ``geometry`` as an ordered list of single-part ``LineString`` pieces.
+
+    A ``LineString`` is returned as a one-element list unchanged. A
+    ``MultiLineString`` (routinely produced by
+    ``hydrofragments.spatial.context.create_channel_context`` clipping a
+    reach against the AOI boundary via ``geometry.intersection``) is first
+    passed through ``shapely.ops.linemerge``: when its parts share
+    endpoints -- the common case for an AOI-boundary split -- linemerge
+    stitches them back into one continuous ``LineString``, restoring a
+    single along-stream distance axis. If linemerge still returns a
+    ``MultiLineString`` (the parts are genuinely disjoint, no shared
+    endpoints), each part is kept separately, in ``geometry.geoms`` order,
+    for the caller to sample/measure independently.
+    """
+    if geometry.geom_type == "LineString":
+        return [geometry]
+    if geometry.geom_type == "MultiLineString":
+        merged = linemerge(geometry)
+        if merged.geom_type == "LineString":
+            return [merged]
+        return list(merged.geoms)
+    raise ValueError(f"unsupported reach geometry type: {geometry.geom_type!r}")
+
+
+def _line_endpoints(geometry: Any) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return ``(first_coord, last_coord)`` for a Line/MultiLineString reach.
+
+    Delegates to ``_linear_parts`` so a mergeable ``MultiLineString`` yields
+    the same endpoints as its merged ``LineString`` would. For a genuinely
+    disjoint ``MultiLineString``, this uses the first coordinate of the
+    first part and the last coordinate of the last part (in geometry
+    order) as the effective endpoints -- an approximation, since disjoint
+    parts have no single well-defined direction, but sufficient for this
+    diagnostic-only direction check (it must never crash, not be exact).
+    """
+    parts = _linear_parts(geometry)
+    return parts[0].coords[0], parts[-1].coords[-1]
 
 
 @dataclass(frozen=True)
@@ -84,37 +124,59 @@ def _reach_topological_order(drainage: Any) -> list[Any]:
 def _sample_bin_elevations(
     geometry: Any, *, dem: np.ndarray, transform: Affine, bin_m: float,
     buffer_m: float, percentile: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(along_stream_distance_m, elevation_m)`` per bin along ``geometry``.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(along_stream_distance_m, elevation_m, point_xy)`` per bin.
 
     Each bin is a ``bin_m``-long line segment, buffered by ``buffer_m`` and
     rasterized; its elevation is the ``percentile`` of finite DEM values
     inside that buffer. A bin with no finite DEM pixels is dropped.
+
+    ``geometry`` may be a ``LineString`` or ``MultiLineString`` (see
+    ``_linear_parts``); each returned part is sampled independently, with
+    ``along_stream_distance_m`` running continuously across parts (each
+    part's own distances offset by the running total length of the parts
+    before it) so bins from different parts never collide. ``point_xy`` is
+    each bin's midpoint, already resolved against the correct part -- the
+    caller must use these coordinates directly rather than re-interpolating
+    ``distance`` against the original (possibly multi-part) ``geometry``,
+    since ``LineString.interpolate`` is not defined for a MultiLineString
+    and, even after linemerge, its internal vertex order need not match
+    this function's per-part distance axis.
     """
-    length = geometry.length
-    if length <= 0:
-        return np.array([]), np.array([])
-    n_bins = max(1, int(np.ceil(length / bin_m)))
-    starts = np.linspace(0.0, length, n_bins, endpoint=False)
+    parts = _linear_parts(geometry)
 
     distances: list[float] = []
     elevations: list[float] = []
-    for start in starts:
-        end = min(start + bin_m, length)
-        mid = (start + end) / 2.0
-        segment = substring(geometry, start, end)
-        footprint = segment.buffer(max(buffer_m, 1e-6))
-        mask = rasterize(
-            [(footprint, 1)], out_shape=dem.shape, transform=transform, fill=0,
-            dtype="uint8", all_touched=True,
-        ).astype(bool)
-        values = dem[mask]
-        values = values[np.isfinite(values)]
-        if values.size == 0:
+    points: list[tuple[float, float]] = []
+    running_offset = 0.0
+    for part in parts:
+        length = part.length
+        if length <= 0:
             continue
-        distances.append(mid)
-        elevations.append(float(np.percentile(values, percentile)))
-    return np.asarray(distances), np.asarray(elevations)
+        n_bins = max(1, int(np.ceil(length / bin_m)))
+        starts = np.linspace(0.0, length, n_bins, endpoint=False)
+        for start in starts:
+            end = min(start + bin_m, length)
+            mid = (start + end) / 2.0
+            segment = substring(part, start, end)
+            footprint = segment.buffer(max(buffer_m, 1e-6))
+            mask = rasterize(
+                [(footprint, 1)], out_shape=dem.shape, transform=transform, fill=0,
+                dtype="uint8", all_touched=True,
+            ).astype(bool)
+            values = dem[mask]
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            distances.append(running_offset + mid)
+            elevations.append(float(np.percentile(values, percentile)))
+            point = part.interpolate(mid)
+            points.append((point.x, point.y))
+        running_offset += length
+
+    if not distances:
+        return np.array([]), np.array([]), np.zeros((0, 2))
+    return np.asarray(distances), np.asarray(elevations), np.asarray(points)
 
 
 def _nan_uniform_filter(data: np.ndarray, *, radius_px: int) -> np.ndarray:
@@ -153,8 +215,14 @@ def build_rem(
     ``NextDownID`` (already validated by the caller -- see
     ``_reach_topological_order``'s docstring). ``corridor_widths_m`` (from
     ``hydrofragments.riverscape.corridor.measure_corridor_widths``) sizes
-    each reach's along-stream elevation-sampling footprint (half the
-    corridor width, floored at one pixel).
+    each reach's along-stream elevation-sampling footprint: the corridor
+    width itself, used directly as a radius around the reach's line
+    (floored at one pixel) -- consistent with how
+    ``hydrofragments.riverscape.centreline.build_centreline`` uses the same
+    value (``geometry.buffer(width_m)``). Every ``str(HydroID)`` key in
+    ``drainage`` must be present in ``corridor_widths_m``; a missing key
+    raises ``ValueError`` rather than silently substituting a default (the
+    same contract ``build_centreline`` enforces).
 
     Per reach, in topological (headwater-to-outlet) order: sample
     ``profile_percentile`` elevation per ``profile_bin_m`` bin; cap the
@@ -214,11 +282,13 @@ def build_rem(
     for hydro_id in order:
         key = str(hydro_id)
         geometry = geometry_by_id[hydro_id]
-        width_m = corridor_widths_m.get(key, profile_bin_m)
+        if key not in corridor_widths_m:
+            raise ValueError(f"corridor_widths_m missing entry for reach {key!r}")
+        width_m = corridor_widths_m[key]
 
-        distances, elevations = _sample_bin_elevations(
+        distances, elevations, points_xy = _sample_bin_elevations(
             geometry, dem=dem_array, transform=transform, bin_m=profile_bin_m,
-            buffer_m=max(width_m / 2.0, pixel_m), percentile=profile_percentile,
+            buffer_m=max(width_m, pixel_m), percentile=profile_percentile,
         )
         if elevations.size == 0:
             degraded.append(f"reach_{key}_no_dem_samples")
@@ -233,8 +303,8 @@ def build_rem(
         downstream_id = next_down[hydro_id]
         if downstream_id in id_set:
             downstream_geometry = geometry_by_id[downstream_id]
-            own_first, own_last = geometry.coords[0], geometry.coords[-1]
-            downstream_ends = (downstream_geometry.coords[0], downstream_geometry.coords[-1])
+            own_first, own_last = _line_endpoints(geometry)
+            downstream_ends = _line_endpoints(downstream_geometry)
             dist_first = min(np.hypot(own_first[0] - dx, own_first[1] - dy) for dx, dy in downstream_ends)
             dist_last = min(np.hypot(own_last[0] - dx, own_last[1] - dy) for dx, dy in downstream_ends)
             if dist_first < dist_last:
@@ -246,9 +316,8 @@ def build_rem(
                 candidate if existing is None else min(existing, candidate)
             )
 
-        for distance, elevation in zip(distances, regressed):
-            point = geometry.interpolate(distance)
-            profile_points.append((point.x, point.y, float(elevation)))
+        for (x, y), elevation in zip(points_xy, regressed):
+            profile_points.append((float(x), float(y), float(elevation)))
 
     if not profile_points:
         raise ValueError("no reach produced usable elevation samples for the profile")
