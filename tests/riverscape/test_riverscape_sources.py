@@ -232,24 +232,31 @@ def _fc_dataset_with_time_and_nodata(*, band: str, nodata: int = 255) -> "xr.Dat
     return xr.Dataset({band: da})
 
 
-def test_load_fc_percentiles_masks_nodata_before_median(monkeypatch) -> None:
+def test_load_fc_percentiles_masks_nodata_and_preserves_time(monkeypatch) -> None:
     monkeypatch.setattr(
-        pystac_client.Client, "open", staticmethod(lambda url, **kw: _FakeClient(["item-1"]))
+        pystac_client.Client, "open",
+        staticmethod(lambda url, **kw: _FakeClient(["item-1"])),
     )
     monkeypatch.setattr(odc_stac, "configure_rio", lambda **kw: None)
     monkeypatch.setattr(
         odc_stac,
         "load",
-        lambda items, **kw: _fc_dataset_with_time_and_nodata(band=kw["bands"][0]),
+        lambda items, **kw: _fc_dataset_with_time_and_nodata(
+            band=kw["bands"][0]
+        ),
     )
 
     result = load_fc_percentiles(
-        _FakeGeobox(), product="ga_ls_fc_pc_cyear_3", bands=["bs_pc_50"], years=(2022, 2023)
-    )
+        _FakeGeobox(),
+        product="ga_ls_fc_pc_cyear_3",
+        bands=["bs_pc_50"],
+        years=(2022, 2023),
+    )["bs_pc_50"]
 
-    # Masked median of [50, <nodata>] must reflect only the valid
-    # observation (50), not a blend that includes the 255 sentinel.
-    assert float(result["bs_pc_50"].isel(y=0, x=0)) == 50.0
+    assert result.dims == ("time", "y", "x")
+    assert result.shape == (2, 1, 1)
+    assert float(result.isel(time=0, y=0, x=0)) == 50.0
+    assert np.isnan(float(result.isel(time=1, y=0, x=0)))
 
 
 def test_load_fc_percentiles_rejects_end_year_before_start_year() -> None:

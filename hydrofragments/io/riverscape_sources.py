@@ -58,28 +58,20 @@ def _search(collection: str, bbox: Sequence[float], *, time_range: str | None = 
     raise RiverscapeSourceUnavailable(f"{collection} unavailable from {STAC_URLS}: {errors}")
 
 
-def _reduce_time(data: xr.DataArray) -> xr.DataArray:
-    """Reduce a ``time`` dimension by median, masking nodata first.
-
-    Integer bands (e.g. DEA Fractional Cover's uint8 percentile bands,
-    nodata=255) commonly arrive with the raw sentinel value rather than
-    NaN filling gaps, so an unmasked median would pull the multi-year
-    composite toward that sentinel wherever any year is missing data.
-    ``data.attrs["nodata"]`` (the convention ``odc.stac``-loaded arrays
-    populate) is checked first; ``.odc.nodata`` (the odc-geo accessor,
-    registered as a side effect of importing ``odc.stac``) is a fallback
-    for arrays that expose it only via that route. Arrays with no ``time``
-    dimension (e.g. DEM bands) pass through unchanged -- there is nothing
-    to reduce, so masking would be a no-op at best.
-    """
-    if "time" not in data.dims:
-        return data
+def _mask_nodata(data: xr.DataArray) -> xr.DataArray:
+    """Convert a declared nodata sentinel to NaN without reducing time."""
     nodata = data.attrs.get("nodata")
     if nodata is None:
         nodata = data.odc.nodata
-    if nodata is not None:
-        data = data.where(data != nodata)
-    return data.median("time", skipna=True)
+    if nodata is None:
+        return data
+    return data.where(data != nodata)
+
+
+def _reduce_dem_time(data: xr.DataArray) -> xr.DataArray:
+    """Reduce a repeated DEM time dimension after masking nodata."""
+    masked = _mask_nodata(data)
+    return masked.median("time", skipna=True) if "time" in masked.dims else masked
 
 
 def load_dem(geobox: Any, *, product: str, band: str) -> xr.DataArray:
@@ -104,7 +96,7 @@ def load_dem(geobox: Any, *, product: str, band: str) -> xr.DataArray:
         raise RiverscapeSourceUnavailable(
             f"{product} band {band!r} read failed: {type(exc).__name__}: {exc}"
         ) from exc
-    return _reduce_time(dataset[band])
+    return _reduce_dem_time(dataset[band])
 
 
 def load_fc_percentiles(
@@ -112,11 +104,11 @@ def load_fc_percentiles(
 ) -> dict[str, xr.DataArray]:
     """Load Fractional Cover percentile bands onto ``geobox`` for ``years``.
 
-    ``years`` is an inclusive ``(start_year, end_year)`` pair. Each band's
-    multi-year composite is reduced to one array by a temporal median --
-    these are already per-year percentile summaries, so a median across
-    years is a stable multi-year summary, not a second percentile
-    reduction. Returns one DataArray per requested band name.
+    ``years`` is an inclusive ``(start_year, end_year)`` pair. The time
+    dimension is preserved (one step per year); nodata sentinels are
+    converted to NaN. Scientific reductions (e.g. bare-year fractions)
+    belong in ``hydrofragments.riverscape.evidence``. Returns one
+    DataArray per requested band name.
     """
     start_year, end_year = years
     if end_year < start_year:
@@ -137,7 +129,7 @@ def load_fc_percentiles(
             raise RiverscapeSourceUnavailable(
                 f"{product} band {band!r} read failed: {type(exc).__name__}: {exc}"
             ) from exc
-        result[band] = _reduce_time(dataset[band])
+        result[band] = _mask_nodata(dataset[band])
     return result
 
 
