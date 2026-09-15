@@ -218,7 +218,22 @@ reduction; the numbers below are from the corrected rerun (`errors: {}`,
 - Shape / pixel count: `[12813, 16033]` / `205,430,829`
 
 ### AHGF alignment (basin-wide)
-- line→EO skeleton (within ~1 km): p50 364.97 m, p95 924.18 m, n 407,211
+- line→EO skeleton (within ~1 km): p50 364.97 m, p95 924.18 m, n 407,211.
+  This p95 is censored: it is computed from lines filtered at
+  `MAX_LINE_OFFSET_PX = 33` px (990 m), so at 924.18 m it sits at 93% of the
+  truncation window — it is partly a property of where the filter cuts off,
+  not a free distributional estimate.
+- Retention / all-lines context: `ahgf_offset.line_to_skeleton_all` (all
+  AHGF line pixels, not restricted to the ~1 km search radius) has p50
+  3,721.09 m, p95 11,485.57 m, n 2,561,413 — versus n 407,211 within ~1 km.
+  That means only roughly 15.9% of basin-wide AHGF line pixels have an EO
+  water skeleton within ~1 km (407,211/2,561,413), a much smaller retained
+  fraction than the narrow AOI's 81.6% (see the AHGF alignment section
+  above). Unlike the narrow AOI, the majority of the basin's AHGF network
+  (~84%) falls outside this search radius entirely — this is material
+  context for interpreting the within-1km statistic above (it describes a
+  small, possibly unrepresentative minority of the network) and for Plan
+  3's corridor design.
 - `UpstrDArea` quantiles (m²): p1 278,736.85, p5 558,117.67, p25
   1,698,952.54, p50 5,248,549.48, p75 33,181,307.65, p95 3,064,075,197.49,
   p99 53,593,517,641.37

@@ -100,6 +100,13 @@ class ZonesConfig:
 
 @dataclass(frozen=True)
 class RiverscapeConfig:
+    # Note: spec §6 (docs/superpowers/specs/2026-09-14-riverscape-zoning-design.md)
+    # also lists a `bridge_cost_weights` (terrain, water, bare, green, npv,
+    # line_distance) field. It is deliberately NOT included on this
+    # dataclass in this plan -- implementing it is deferred to Plan 3,
+    # where bridging is actually built (this plan's Task 4 script never
+    # implemented bridging either, despite the table listing it). This is
+    # a recorded human decision, not an oversight.
     mode: str = "auto"
     dem_product: str = "ga_srtm_dem1sv1_0"
     dem_band: str = "dem_s"
@@ -154,10 +161,14 @@ class RiverscapeConfig:
     # 630.71 m), so the Plan 1 placeholder ceiling of 600.0 m is too tight
     # at basin scale ("The 600 m ceiling remains too tight for this
     # catchment's measured AHGF/EO offset at basin scale." -- findings
-    # doc). 1200.0 m clears the measured p95 with roughly 30% headroom;
-    # it is deliberately not set to exactly 924.18 since p95 is a soft
-    # distributional boundary and this field is a hard ceiling, not a
-    # p95 pin.
+    # doc). 1200.0 m clears the p95 (924.18 m) of AHGF lines matched within
+    # the 1km search radius, with roughly 30% headroom -- note this p95 is
+    # itself censored near the radius's 990 m boundary (924.18 m sits at
+    # 93% of that window), and only ~15.9% of the basin's AHGF network
+    # matches within that radius at all (see the findings doc's
+    # basin-scale AHGF alignment section). It is deliberately not set to
+    # exactly 924.18 since p95 is a soft distributional boundary and this
+    # field is a hard ceiling, not a p95 pin.
     corridor_max_m: float = 1200.0
     alignment_quantile: float = 0.95
     width_growth_factor: float = 3.0

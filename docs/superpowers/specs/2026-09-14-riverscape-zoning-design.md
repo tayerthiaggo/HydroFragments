@@ -374,9 +374,9 @@ added to `_TOP_LEVEL_KEYS` and `scientific_config`;
 | `fc_product` / `bare_band` / `green_band` | `ga_ls_fc_pc_cyear_3` / confirmed in Phase 0 |
 | `waterbodies_source` | `None` (Phase 0 picks WFS bbox or national file) |
 | `f_seed`, `f_chan_high` | 0.05, 0.10 |
-| `bare_threshold_pct`, `bare_year_fraction` | 50, 0.6 |
+| `bare_threshold_floor_pct`, `bare_year_fraction` | 30, 0.6 (shipped; renamed from `bare_threshold_pct` and changed from 50 -- see the findings doc's basin-scale rerun section, "Implications for Plan 3" bare_threshold bullet) |
 | `trough_radius_m`, `trough_depth_m`, `h_chan_m` | 150, 0.5, 2.0 |
-| `corridor_min_m`, `corridor_max_m`, `alignment_quantile` | 90, 600, 0.95 |
+| `corridor_min_m`, `corridor_max_m`, `alignment_quantile` | 90, 1200, 0.95 (`corridor_max_m` changed from 600 -- see the findings doc's basin-scale rerun section, "AHGF alignment (basin-wide)" and "Implications for Plan 3") |
 | `width_growth_factor` | 3.0 |
 | `profile_bin_m`, `profile_percentile`, `rem_k`, `rem_max_distance_m` | 300, 10, 8, 5000 |
 | `envelope_quantile`, `envelope_h_max_m`, `envelope_min_bin_pixels`, `slope_max_deg` | 0.95, 15, 200, 2.0 |
@@ -475,14 +475,17 @@ widths are consistency checks.
 
 | # | Phase | Acceptance |
 |---|---|---|
-| 0 | This spec; data-access spike on Fitzroy | DEM bands/CRS, FC bands, DEA Waterbodies route confirmed; AHGF offset measured; `dem_s` vs `dem_h` decided; aligned layers pass grid equality |
+| 0 | This spec; data-access spike on Fitzroy (narrow AOI) | DEM bands/CRS, FC bands, DEA Waterbodies route confirmed; AHGF offset measured; `dem_s` vs `dem_h` decided; aligned layers pass grid equality |
 | 1 | `wet_domain`, `classify_hydroperiod`, `combine_zones` | domain, boundary, mapping and import-boundary tests |
-| 2 | `RiverscapeConfig`, loaders, corridor, centreline, REM | config round-trip and hash bump; offset, anabranch and pit tests |
-| 3 | Channel rules, waterbodies, gap bridging | sand-bed, billabong, scald, family tests; vegetated/narrow/dangling/unbridged/no-overwrite bridge tests; Fitzroy bridge-cost calibration recorded |
-| 4 | Riverine vs non-riverine | dam, billabong, single-bin tests |
-| 5 | Workflow, exports, manifest | integration tests in all modes; gating test extended |
-| 6 | Windowed execution | full Fitzroy within memory budget; no seam errors |
-| 7 | Validation harness | report produced; manager-polygon slot ready |
+| 2 | AOI widen to full Fitzroy basin + Phase 0 rerun; `combine_zones` mask-derived `emitted_zones`/`has_zone_1`; `RiverscapeConfig` skeleton + hash bump | widened findings doc with real `UpstrDArea`/AHGF-offset/FC distributions; config round-trip; updated zone-combination test |
+| 3 | Loaders (`io/riverscape_sources.py`), corridor, centreline, REM | offset, anabranch and pit tests, defaults set from Phase 2's widened numbers |
+| 4 | Channel rules, waterbodies, gap bridging | sand-bed, billabong, scald, family tests; vegetated/narrow/dangling/unbridged/no-overwrite bridge tests; Fitzroy bridge-cost calibration recorded |
+| 5 | Riverine vs non-riverine | dam, billabong, single-bin tests |
+| 6 | Workflow, exports, manifest | integration tests in all modes; gating test extended |
+| 7 | Windowed execution | full Fitzroy within memory budget; no seam errors |
+| 8 | Validation harness | report produced; manager-polygon slot ready |
+
+(Phases renumbered 2026-09-14 to insert the AOI-widen prep phase; see §12.)
 
 ---
 
