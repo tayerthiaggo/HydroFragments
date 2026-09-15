@@ -9,6 +9,15 @@ from scipy import ndimage
 
 @dataclass(frozen=True)
 class BareCalibration:
+    """Bare-soil threshold calibration for the B (bare_stable) evidence bit.
+
+    ``background`` pixels are outside the corridor; ``candidate`` pixels are
+    channel-connected and either high-water or terrain-like. When both pools
+    have enough support and the channel is barer than the background, the
+    threshold is the midpoint (clamped to ``floor_pct``); otherwise
+    ``floor_pct`` is used and ``bare_threshold_fallback`` is recorded.
+    """
+
     threshold_pct: float
     candidate_median_pct: float | None
     background_median_pct: float | None
@@ -19,6 +28,13 @@ class BareCalibration:
 
 @dataclass(frozen=True)
 class RiverscapeEvidence:
+    """Per-pixel observed-channel evidence and confidence for riverscape zoning.
+
+    Fractional-cover yearly stacks must be NaN-masked (nodata sentinels
+    converted to NaN) before calling ``build_evidence``; this module treats
+    non-finite values as missing years only.
+    """
+
     water_high: np.ndarray
     waterbody_riverine: np.ndarray
     bare_stable: np.ndarray
@@ -49,6 +65,12 @@ def calibrate_bare_threshold(
     floor_pct: float,
     min_pixels: int = 200,
 ) -> BareCalibration:
+    """Calibrate a bare-soil percentile threshold from multi-year FC stacks.
+
+    Accepts a 2-D (single year) or 3-D ``bare_yearly`` array. ``floor_pct``
+    is the degraded-path fallback when calibration pools lack contrast or
+    support.
+    """
     yearly = _year_stack(bare_yearly)
     candidate = np.asarray(candidate_mask, bool)
     background = np.asarray(background_mask, bool)
@@ -108,6 +130,15 @@ def build_evidence(
     min_calibration_pixels: int = 200,
     line_fallback_mask: np.ndarray | None = None,
 ) -> RiverscapeEvidence:
+    """Build per-pixel riverscape evidence from zoning inputs.
+
+    ``bare_yearly`` must already be NaN-masked (callers load FC via
+    ``load_fc_percentiles`` and pass masked arrays). Background calibration
+    uses pixels outside ``corridor_mask``; candidates are
+    ``connected & (water_high | terrain)``. When fewer than two yearly
+    observations are supplied, B stability is unsatisfiable and
+    ``bare_single_year_no_stability`` is recorded.
+    """
     frequency = np.asarray(frequency, float)
     yearly = _year_stack(bare_yearly)
     arrays = [
@@ -173,6 +204,9 @@ def build_evidence(
         + water_family.astype(np.uint8)
         + geomorphic_family.astype(np.uint8)
     )
+    degraded: list[str] = list(calibration.degraded_reasons)
+    if yearly.shape[0] < 2:
+        degraded.append("bare_single_year_no_stability")
     return RiverscapeEvidence(
         water_high=water_high,
         waterbody_riverine=waterbody,
@@ -184,7 +218,7 @@ def build_evidence(
         bare_valid_years=valid_years,
         confidence=confidence,
         calibration=calibration,
-        degraded_reasons=calibration.degraded_reasons,
+        degraded_reasons=tuple(degraded),
     )
 
 

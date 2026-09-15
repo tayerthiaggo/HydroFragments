@@ -59,7 +59,17 @@ def _search(collection: str, bbox: Sequence[float], *, time_range: str | None = 
 
 
 def _mask_nodata(data: xr.DataArray) -> xr.DataArray:
-    """Convert a declared nodata sentinel to NaN without reducing time."""
+    """Convert a declared nodata sentinel to NaN without reducing time.
+
+    Integer bands (e.g. DEA Fractional Cover's uint8 percentile bands,
+    nodata=255) commonly arrive with the raw sentinel value rather than
+    NaN filling gaps, so an unmasked median would pull a composite toward
+    that sentinel wherever any year is missing data. ``data.attrs["nodata"]``
+    (the convention ``odc.stac``-loaded arrays populate) is checked first;
+    ``.odc.nodata`` (the odc-geo accessor, registered as a side effect of
+    importing ``odc.stac``) is a fallback for arrays that expose it only
+    via that route.
+    """
     nodata = data.attrs.get("nodata")
     if nodata is None:
         nodata = data.odc.nodata
@@ -69,7 +79,13 @@ def _mask_nodata(data: xr.DataArray) -> xr.DataArray:
 
 
 def _reduce_dem_time(data: xr.DataArray) -> xr.DataArray:
-    """Reduce a repeated DEM time dimension after masking nodata."""
+    """Reduce a repeated DEM time dimension after masking nodata.
+
+    DEM tiles may repeat across a nominal ``time`` dimension; nodata must be
+    masked before ``median("time")`` for the same reason as FC bands (see
+    ``_mask_nodata``). Arrays with no ``time`` dimension pass through
+    unchanged.
+    """
     masked = _mask_nodata(data)
     return masked.median("time", skipna=True) if "time" in masked.dims else masked
 

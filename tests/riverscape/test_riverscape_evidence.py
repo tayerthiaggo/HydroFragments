@@ -31,6 +31,37 @@ def test_calibration_uses_midpoint_when_channel_is_barer() -> None:
     assert result.degraded_reasons == ()
 
 
+def test_single_year_bare_emits_no_stability_degradation() -> None:
+    shape = (2, 4)
+    yearly = np.array([[60, 60, 20, 20], [60, 60, 20, 20]], float)
+    corridor_mask = np.zeros(shape, bool)
+    corridor_mask[:, :2] = True
+    centreline = np.zeros(shape, bool)
+    centreline[:, 0] = True
+    result = build_evidence(
+        frequency=np.full(shape, 20.0),
+        bare_yearly=yearly,
+        riverine_waterbody_mask=np.zeros(shape, bool),
+        rem=np.zeros(shape),
+        trough_depth=np.zeros(shape),
+        domain=np.ones(shape, bool),
+        centreline=centreline,
+        corridor_mask=corridor_mask,
+        f_chan_high=0.1,
+        bare_threshold_floor_pct=30.0,
+        bare_year_fraction=0.6,
+        h_chan_m=2.0,
+        trough_depth_m=0.5,
+        min_calibration_pixels=4,
+    )
+
+    assert "bare_single_year_no_stability" in result.degraded_reasons
+    assert result.calibration.degraded_reasons == ()
+    assert result.calibration.candidate_median_pct == 60.0
+    assert result.calibration.background_median_pct == 20.0
+    assert not result.bare_stable.any()
+
+
 def test_calibration_falls_back_when_contrast_reverses() -> None:
     yearly = np.array([[[10, 10, 50, 50]], [[20, 20, 60, 60]]], float)
     candidate = np.array([[True, True, False, False]])
