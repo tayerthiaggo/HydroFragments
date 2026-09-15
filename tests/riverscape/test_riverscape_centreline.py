@@ -136,6 +136,29 @@ def test_reach_whose_own_corridor_excludes_all_nearby_water_is_line_fallback() -
     assert result.line_fallback_reaches == ("1",)
 
 
+def test_medial_axis_thins_a_thick_water_block() -> None:
+    # A solid 6x6 block of water (much thicker than the other fixtures'
+    # 1-pixel-wide bands) so medial_axis actually has interior pixels to
+    # thin away. If medial_axis(restricted) were replaced by
+    # restricted itself (no thinning), the skeleton pixel count would
+    # equal the restricted water-mask pixel count instead of being
+    # strictly smaller -- nothing else in this file would catch that.
+    water = np.zeros((12, 12), dtype=bool)
+    water[3:9, 3:9] = True  # 6x6 solid block = 36 pixels
+    line = LineString([(90.0, 135.0), (270.0, 135.0)])
+    drainage = _drainage(line)
+
+    result = build_centreline(
+        drainage, water, {"1": 200.0}, transform=_TRANSFORM, pixel_m=30.0
+    )
+
+    assert result.line_fallback_reaches == ()
+    assert result.skeleton.any()
+    water_pixel_count = int(water[3:9, 3:9].sum())
+    skeleton_pixel_count = int(result.skeleton.sum())
+    assert skeleton_pixel_count < water_pixel_count
+
+
 def test_rejects_missing_corridor_width_entry() -> None:
     drainage = _drainage(LineString([(0.0, 0.0), (100.0, 100.0)]))
     with pytest.raises(ValueError, match="corridor_widths_m"):

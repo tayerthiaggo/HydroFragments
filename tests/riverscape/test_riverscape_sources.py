@@ -76,6 +76,69 @@ def test_load_dem_returns_grid_aligned_dataarray(monkeypatch) -> None:
     assert float(result.isel(y=0, x=0)) == 10.0
 
 
+class _CapturingClient:
+    """Like _FakeClient, but records the kwargs passed to .search()."""
+
+    def __init__(self, items, captured: dict[str, Any]):
+        self._items = items
+        self._captured = captured
+
+    def search(self, **kwargs):
+        self._captured["search_kwargs"] = kwargs
+        return _FakeSearch(self._items)
+
+
+def test_load_dem_forwards_geobox_and_derived_bbox_to_odc_stac_load(monkeypatch) -> None:
+    # Nothing previously asserted that `geobox` actually reaches
+    # odc.stac.load, or that the STAC search bbox is derived from the
+    # geobox's own extent -- the fake loaders monkeypatched elsewhere
+    # ignore kwargs entirely.
+    captured: dict[str, Any] = {}
+    search_captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        pystac_client.Client, "open",
+        staticmethod(lambda url, **kw: _CapturingClient(["item-1"], search_captured)),
+    )
+    monkeypatch.setattr(odc_stac, "configure_rio", lambda **kw: None)
+
+    def _fake_load(items, **kw):
+        captured["load_kwargs"] = kw
+        return _dem_dataset(band=kw["bands"][0])
+
+    monkeypatch.setattr(odc_stac, "load", _fake_load)
+
+    bbox_ll = (110.0, -30.0, 111.0, -29.0)
+    geobox = _FakeGeobox(bbox_ll)
+    load_dem(geobox, product="ga_srtm_dem1sv1_0", band="dem_s")
+
+    assert captured["load_kwargs"]["geobox"] is geobox
+    assert search_captured["search_kwargs"]["bbox"] == list(bbox_ll)
+
+
+def test_load_fc_percentiles_forwards_years_as_datetime_filter_to_search(monkeypatch) -> None:
+    # Nothing previously asserted that `years` actually becomes the
+    # `datetime=` filter string passed to Client.search.
+    search_captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        pystac_client.Client, "open",
+        staticmethod(lambda url, **kw: _CapturingClient(["item-1"], search_captured)),
+    )
+    monkeypatch.setattr(odc_stac, "configure_rio", lambda **kw: None)
+    monkeypatch.setattr(
+        odc_stac, "load", lambda items, **kw: _dem_dataset(band=kw["bands"][0])
+    )
+
+    load_fc_percentiles(
+        _FakeGeobox(), product="ga_ls_fc_pc_cyear_3", bands=["bs_pc_50"], years=(2019, 2021)
+    )
+
+    datetime_filter = search_captured["search_kwargs"]["datetime"]
+    assert "2019" in datetime_filter
+    assert "2021" in datetime_filter
+
+
 def test_load_dem_raises_riverscape_source_unavailable_when_all_stac_urls_fail(
     monkeypatch,
 ) -> None:
