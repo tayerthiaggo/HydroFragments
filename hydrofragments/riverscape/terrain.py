@@ -45,6 +45,16 @@ def _reach_topological_order(drainage: Any) -> list[Any]:
     module must not import ``hydrofragments.spatial``.
     """
     ids = list(drainage["HydroID"])
+    if len(set(ids)) != len(ids):
+        seen: set[Any] = set()
+        duplicates: set[Any] = set()
+        for reach_id in ids:
+            if reach_id in seen:
+                duplicates.add(reach_id)
+            seen.add(reach_id)
+        raise ValueError(
+            f"drainage HydroID contains duplicate value(s): {sorted(duplicates, key=str)}"
+        )
     id_set = set(ids)
     next_down = dict(zip(drainage["HydroID"], drainage["NextDownID"]))
     in_degree = {i: 0 for i in ids}
@@ -136,7 +146,6 @@ def build_rem(
     rem_k: int,
     rem_max_distance_m: float,
     trough_radius_m: float,
-    trough_depth_m: float,
 ) -> TerrainResult:
     """Build the Relative Elevation Model, local trough depth, and slope rasters.
 
@@ -159,13 +168,38 @@ def build_rem(
     (``rem_k`` neighbours, ``scipy.spatial.cKDTree``, capped at
     ``rem_max_distance_m``). ``REM = dem - interpolated_profile``.
     ``trough_depth = local_mean(dem, trough_radius_m) - dem`` via a
-    NaN-aware box filter. ``slope_deg`` from ``np.gradient``.
+    NaN-aware box filter -- this is the raw, continuous local-trough-depth
+    signal; thresholding it into a boolean/evidence signal against a depth
+    cutoff is a downstream (Phase 4 channel-rules) concern, not this
+    module's, so no trough-depth threshold parameter is accepted here.
+    ``slope_deg`` from ``np.gradient``.
+
+    Flow direction (which end of each reach's ``LineString`` is
+    "downstream") is assumed from coordinate digitisation order
+    (``regressed[-1]`` = downstream outflow) since ``From_Node``/``To_Node``
+    are not otherwise read. For every reach whose ``NextDownID`` names
+    another reach in this same drainage set, the endpoint-proximity to that
+    downstream reach is checked as a diagnostic: if the reach's first
+    coordinate sits closer to the downstream reach than its last coordinate
+    does, ``f"reach_{key}_geometry_direction_suspect"`` is appended to
+    ``degraded_reasons`` (a flag, not an error -- some legitimate low
+    sample-density topologies can trigger it too).
     """
     missing = [c for c in _REQUIRED_COLUMNS if c not in drainage.columns]
     if missing:
         raise ValueError(f"drainage missing required columns: {missing}")
     if rem_k < 1:
         raise ValueError("rem_k must be a positive integer")
+    if not np.isfinite(pixel_m) or pixel_m <= 0:
+        raise ValueError("pixel_m must be finite and positive")
+    if not np.isfinite(profile_bin_m) or profile_bin_m <= 0:
+        raise ValueError("profile_bin_m must be finite and positive")
+    if not (0.0 <= profile_percentile <= 100.0):
+        raise ValueError("profile_percentile must be in [0, 100]")
+    if not np.isfinite(rem_max_distance_m) or rem_max_distance_m <= 0:
+        raise ValueError("rem_max_distance_m must be finite and positive")
+    if not np.isfinite(trough_radius_m) or trough_radius_m <= 0:
+        raise ValueError("trough_radius_m must be finite and positive")
 
     dem_array = np.asarray(dem, dtype=np.float32)
     order = _reach_topological_order(drainage)
@@ -198,6 +232,14 @@ def build_rem(
 
         downstream_id = next_down[hydro_id]
         if downstream_id in id_set:
+            downstream_geometry = geometry_by_id[downstream_id]
+            own_first, own_last = geometry.coords[0], geometry.coords[-1]
+            downstream_ends = (downstream_geometry.coords[0], downstream_geometry.coords[-1])
+            dist_first = min(np.hypot(own_first[0] - dx, own_first[1] - dy) for dx, dy in downstream_ends)
+            dist_last = min(np.hypot(own_last[0] - dx, own_last[1] - dy) for dx, dy in downstream_ends)
+            if dist_first < dist_last:
+                degraded.append(f"reach_{key}_geometry_direction_suspect")
+
             candidate = float(regressed[-1])
             existing = downstream_cap.get(downstream_id)
             downstream_cap[downstream_id] = (

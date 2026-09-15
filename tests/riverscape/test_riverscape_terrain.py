@@ -35,46 +35,51 @@ def _linear_dem(shape=(10, 10), *, slope_per_row=1.0, base=100.0) -> np.ndarray:
 
 
 def test_isotonic_regression_resists_a_single_bin_void_pit() -> None:
-    # One straight reach, headwater to outlet, with an artificial elevation
-    # PIT injected by a corrupted DEM cell partway down -- the regressed
-    # profile must stay non-increasing and must not report a trough at the
-    # pit location out of proportion to real terrain (a running minimum
-    # would instead drag every downstream bin down to the pit's depth).
-    dem = _linear_dem(shape=(10, 10), slope_per_row=1.0, base=100.0)
-    dem[6, :] = -500.0  # a single corrupted row: a "void pit"
+    # 30-row DEM (bigger than the original 10-row fixture) so the pit at
+    # row 10 has enough downstream length to show attenuation. profile_percentile=10.0
+    # (RiverscapeConfig's production default, not this test's original 50.0) is required
+    # for the pit to actually survive per-bin sampling and reach isotonic regression --
+    # at percentile 50 the median over the sampling buffer already launders a single
+    # corrupted row before PAVA ever sees it, which is why an earlier version of this
+    # test could not distinguish PAVA from a naive running minimum (mutation-tested:
+    # swapping isotonic_regression for np.minimum.accumulate left the old test green).
+    dem = _linear_dem(shape=(30, 10), slope_per_row=1.0, base=100.0)
+    dem[10, :] = -500.0  # a single corrupted row: a "void pit"
 
-    line = LineString([(150.0, 300.0 - 15.0), (150.0, 300.0 - 285.0)])  # straight down the grid
+    line = LineString([(150.0, 300.0 - 15.0), (150.0, 300.0 - 30 * 30.0 + 15.0)])
     drainage = gpd.GeoDataFrame(
         [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
     )
 
     result = build_rem(
         drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
-        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
-        rem_max_distance_m=500.0, trough_radius_m=60.0, trough_depth_m=0.5,
+        profile_percentile=10.0, corridor_widths_m={"1": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
     )
 
-    # Row 6 itself is not a fair probe: the DEM there is *literally*
-    # corrupted (-500 for the whole row), so REM = dem - profile at that
-    # exact row necessarily reflects the raw corrupted input verbatim --
-    # that is correct behaviour (an honest report of a bad input pixel),
-    # not a resistance failure, and no profile-fitting algorithm can or
-    # should paper over it. What must NOT happen is the pit's depth
-    # leaking further downstream: a running minimum would carry ~-500
-    # forward into every row below the pit (rows 7-9) forever, whereas
-    # isotonic (least-squares) regression only pools the pit with as many
-    # neighbours as monotonicity requires and lets rows downstream of that
-    # recover toward their own measured (less extreme) values.
-    assert np.nanmin(result.rem[7:, :]) > -100.0
+    # PAVA pools the pit into one non-increasing block with its neighbors,
+    # attenuating it to the pooled block's mean (a large but bounded value,
+    # not -500 propagated forever); it cannot increase values once pooled
+    # (monotonicity forbids it), so downstream bins do not "recover toward
+    # their own measured values" -- they stay attenuated but bounded. A
+    # running minimum instead propagates -500 to every downstream bin
+    # forever. Rows strictly downstream of the pit (rows 14+, comfortably
+    # past the pooled block) must stay well below the running-minimum's
+    # ~586 REM, but the PAVA design keeps them near ~103-118.
+    assert np.nanmax(result.rem[14:, :]) < 200.0
 
 
 def test_confluence_caps_downstream_reach_at_tributary_minimum_outflow() -> None:
     # Two headwater reaches (2, 3) both flow into reach 1 (the trunk) at
-    # node 10. Reach 2's outflow elevation is much lower than reach 3's;
-    # per spec §4.2 step 3, the trunk's upstream end must be capped at the
-    # MINIMUM of its tributaries' outflows (not an average, not the higher
-    # one) before its own isotonic regression runs.
+    # node 10. The DEM is asymmetric between the two tributaries' columns
+    # (not just row-varying, unlike the original fixture, whose mirror-image
+    # tributary geometry over a row-only DEM made both tributaries produce
+    # IDENTICAL outflow values -- unable to distinguish min from max from
+    # mean; mutation-tested by a reviewer, confirmed all three left the old
+    # test green) so their outflow elevations genuinely differ, letting this
+    # test actually verify the cap uses the MINIMUM.
     dem = _linear_dem(shape=(10, 10), slope_per_row=1.0, base=100.0)
+    dem[:, :5] -= 20.0  # lower the left half (trib_low's columns) by 20m
 
     trunk = LineString([(150.0, 300.0 - 165.0), (150.0, 300.0 - 285.0)])
     trib_low = LineString([(60.0, 300.0 - 15.0), (150.0, 300.0 - 165.0)])
@@ -93,11 +98,20 @@ def test_confluence_caps_downstream_reach_at_tributary_minimum_outflow() -> None
         drainage, dem, transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
         profile_percentile=50.0,
         corridor_widths_m={"1": 90.0, "2": 90.0, "3": 90.0},
-        rem_k=4, rem_max_distance_m=500.0, trough_radius_m=60.0, trough_depth_m=0.5,
+        rem_k=4, rem_max_distance_m=500.0, trough_radius_m=60.0,
     )
 
-    assert result.degraded_reasons == () or "no_dem_samples" not in " ".join(result.degraded_reasons)
-    assert np.isfinite(result.rem).any()
+    # trib_low's outflow (~77) is lower than trib_high's (~94); the trunk's
+    # upstream end must be capped at the MINIMUM of the two, not their
+    # average or the higher one. A wrong cap rule (max or mean) produces a
+    # visibly different trunk REM at the column nearest the confluence.
+    assert np.nanmax(result.rem[6:, 5]) > 12.0
+
+    # All three reaches here are digitised headwater-to-outlet (their last
+    # coordinate is the downstream end), so none should be flagged as
+    # having a suspect direction -- this guards against the direction
+    # check false-positiving on normally-oriented topology.
+    assert not any("geometry_direction_suspect" in reason for reason in result.degraded_reasons)
 
 
 def test_rejects_missing_drainage_topology_columns() -> None:
@@ -108,7 +122,7 @@ def test_rejects_missing_drainage_topology_columns() -> None:
         build_rem(
             drainage, _linear_dem(), transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
             profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
-            rem_max_distance_m=500.0, trough_radius_m=60.0, trough_depth_m=0.5,
+            rem_max_distance_m=500.0, trough_radius_m=60.0,
         )
 
 
@@ -121,5 +135,32 @@ def test_rejects_non_positive_rem_k() -> None:
         build_rem(
             drainage, _linear_dem(), transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
             profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=0,
-            rem_max_distance_m=500.0, trough_radius_m=60.0, trough_depth_m=0.5,
+            rem_max_distance_m=500.0, trough_radius_m=60.0,
         )
+
+
+@pytest.mark.parametrize(
+    "field, value, match",
+    [
+        ("pixel_m", 0.0, "pixel_m"),
+        ("pixel_m", float("nan"), "pixel_m"),
+        ("profile_bin_m", -5.0, "profile_bin_m"),
+        ("profile_percentile", 150.0, "profile_percentile"),
+        ("profile_percentile", -1.0, "profile_percentile"),
+        ("rem_max_distance_m", 0.0, "rem_max_distance_m"),
+        ("trough_radius_m", -1.0, "trough_radius_m"),
+    ],
+)
+def test_rejects_invalid_numeric_parameters(field, value, match) -> None:
+    line = LineString([(0.0, 285.0), (0.0, 15.0)])
+    drainage = gpd.GeoDataFrame(
+        [_reach(1, line, next_down=-1, from_node=1, to_node=2)], crs="EPSG:3577"
+    )
+    kwargs = dict(
+        transform=_TRANSFORM, pixel_m=_PIXEL_M, profile_bin_m=30.0,
+        profile_percentile=50.0, corridor_widths_m={"1": 90.0}, rem_k=4,
+        rem_max_distance_m=500.0, trough_radius_m=60.0,
+    )
+    kwargs[field] = value
+    with pytest.raises(ValueError, match=match):
+        build_rem(drainage, _linear_dem(), **kwargs)
