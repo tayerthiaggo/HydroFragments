@@ -146,7 +146,9 @@ def test_width_cap_stops_attached_billabong_growth() -> None:
     result = _run(evidence, centreline, water_seed, factor=2.0)
 
     assert result.channel[5, 1:10].all()
-    assert result.channel[4, 5]
+    assert result.channel[4, 5]  # 30 m — inside cap
+    assert result.channel[3, 5]  # 60 m — inclusive boundary
+    assert not result.channel[2, 5]  # 90 m — beyond cap
     assert not result.channel[0, 5]
     assert result.seed_half_width_m["reach-1"] == 30.0
 
