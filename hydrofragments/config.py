@@ -11,7 +11,7 @@ import math
 from typing import Any, Literal, Mapping
 
 ACCEPTED_CONFIG_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
-SCIENTIFIC_HASH_SCHEMA_VERSION = "1.2.0"
+SCIENTIFIC_HASH_SCHEMA_VERSION = "1.3.0"
 HASH_ALGORITHM_VERSION = "sha256-json-v1"
 
 SpatialProduct = Literal[
@@ -99,14 +99,17 @@ class ZonesConfig:
 
 
 @dataclass(frozen=True)
+class BridgeCostWeights:
+    terrain: float = 1.0
+    water: float = 1.0
+    bare: float = 0.5
+    green: float = 1.0
+    npv: float = 0.0
+    line_distance: float = 0.5
+
+
+@dataclass(frozen=True)
 class RiverscapeConfig:
-    # Note: spec §6 (docs/superpowers/specs/2026-09-14-riverscape-zoning-design.md)
-    # also lists a `bridge_cost_weights` (terrain, water, bare, green, npv,
-    # line_distance) field. It is deliberately NOT included on this
-    # dataclass in this plan -- implementing it is deferred to Plan 3,
-    # where bridging is actually built (this plan's Task 4 script never
-    # implemented bridging either, despite the table listing it). This is
-    # a recorded human decision, not an oversight.
     mode: str = "auto"
     dem_product: str = "ga_srtm_dem1sv1_0"
     dem_band: str = "dem_s"
@@ -186,6 +189,9 @@ class RiverscapeConfig:
     bridge_max_length_m: float = 2000.0
     bridge_max_cost_per_m: float = 1.0
     bridge_rem_max_m: float = 5.0
+    bridge_cost_weights: BridgeCostWeights = field(
+        default_factory=BridgeCostWeights
+    )
     riparian_green_pct: float = 40.0
     narrow_width_px: int = 2
 
@@ -634,10 +640,46 @@ class HydroConfig:
                 "envelope_h_max_m", "envelope_min_bin_pixels", "slope_max_deg",
                 "min_channel_confidence", "include_line_fallback_in_channel",
                 "bridge_enabled", "bridge_max_length_m", "bridge_max_cost_per_m",
-                "bridge_rem_max_m", "riparian_green_pct", "narrow_width_px",
+                "bridge_rem_max_m", "bridge_cost_weights", "riparian_green_pct",
+                "narrow_width_px",
             },
         )
         riverscape_defaults = RiverscapeConfig()
+        weight_defaults = BridgeCostWeights()
+        weight_raw = riverscape_raw.get("bridge_cost_weights", {})
+        if not isinstance(weight_raw, Mapping):
+            raise ConfigError("riverscape.bridge_cost_weights must be a mapping")
+        weight_keys = {
+            "terrain", "water", "bare", "green", "npv", "line_distance"
+        }
+        unknown_weight_keys = set(weight_raw) - weight_keys
+        if unknown_weight_keys:
+            joined = ", ".join(
+                f"riverscape.bridge_cost_weights.{key}"
+                for key in sorted(unknown_weight_keys)
+            )
+            raise ConfigError(f"unknown config key(s): {joined}")
+        bridge_cost_weights = BridgeCostWeights(
+            **{
+                key: float(weight_raw.get(key, getattr(weight_defaults, key)))
+                for key in weight_keys
+            }
+        )
+        weight_values = tuple(
+            getattr(bridge_cost_weights, key) for key in sorted(weight_keys)
+        )
+        if not all(math.isfinite(value) for value in weight_values):
+            raise ConfigError(
+                "riverscape.bridge_cost_weights values must be finite"
+            )
+        if not all(value >= 0 for value in weight_values):
+            raise ConfigError(
+                "riverscape.bridge_cost_weights values must be non-negative"
+            )
+        if not any(value > 0 for value in weight_values):
+            raise ConfigError(
+                "riverscape.bridge_cost_weights requires at least one positive value"
+            )
         riverscape_mode = str(riverscape_raw.get("mode", riverscape_defaults.mode))
         if riverscape_mode not in {"off", "auto", "required"}:
             raise ConfigError(
@@ -787,6 +829,7 @@ class HydroConfig:
                     "bridge_rem_max_m", riverscape_defaults.bridge_rem_max_m
                 )
             ),
+            bridge_cost_weights=bridge_cost_weights,
             riparian_green_pct=_percentage(
                 riverscape_raw.get(
                     "riparian_green_pct", riverscape_defaults.riparian_green_pct
@@ -1233,6 +1276,16 @@ class HydroConfig:
                 "bridge_max_cost_per_m": self.riverscape.bridge_max_cost_per_m,
                 "bridge_max_length_m": self.riverscape.bridge_max_length_m,
                 "bridge_rem_max_m": self.riverscape.bridge_rem_max_m,
+                "bridge_cost_weights": {
+                    "bare": self.riverscape.bridge_cost_weights.bare,
+                    "green": self.riverscape.bridge_cost_weights.green,
+                    "line_distance": (
+                        self.riverscape.bridge_cost_weights.line_distance
+                    ),
+                    "npv": self.riverscape.bridge_cost_weights.npv,
+                    "terrain": self.riverscape.bridge_cost_weights.terrain,
+                    "water": self.riverscape.bridge_cost_weights.water,
+                },
                 "corridor_max_m": self.riverscape.corridor_max_m,
                 "corridor_min_m": self.riverscape.corridor_min_m,
                 "dem_band": self.riverscape.dem_band,
@@ -1339,6 +1392,7 @@ class HydroConfig:
 
 __all__ = [
     "ACCEPTED_CONFIG_SCHEMA_VERSIONS",
+    "BridgeCostWeights",
     "ConfigError",
     "HASH_ALGORITHM_VERSION",
     "HydroConfig",

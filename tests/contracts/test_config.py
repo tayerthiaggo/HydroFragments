@@ -443,3 +443,60 @@ def test_riverscape_config_rejects_non_positive_or_non_finite_numerics(
 
     with pytest.raises(ConfigError, match=f"riverscape.{field}"):
         HydroConfig.from_mapping(minimal_config(riverscape={field: value}))
+
+
+def test_bridge_cost_weights_defaults_and_hash_shape() -> None:
+    from hydrofragments.config import HydroConfig
+
+    config = HydroConfig.from_mapping(minimal_config())
+    weights = config.riverscape.bridge_cost_weights
+    assert (
+        weights.terrain,
+        weights.water,
+        weights.bare,
+        weights.green,
+        weights.npv,
+        weights.line_distance,
+    ) == (1.0, 1.0, 0.5, 1.0, 0.0, 0.5)
+    assert config.scientific_config()["riverscape"]["bridge_cost_weights"] == {
+        "bare": 0.5,
+        "green": 1.0,
+        "line_distance": 0.5,
+        "npv": 0.0,
+        "terrain": 1.0,
+        "water": 1.0,
+    }
+    changed = HydroConfig.from_mapping(
+        minimal_config(
+            riverscape={"bridge_cost_weights": {"terrain": 2.0}}
+        )
+    )
+    assert changed.config_hash != config.config_hash
+
+
+@pytest.mark.parametrize(
+    "weights,match",
+    [
+        ({"terrain": -1}, "non-negative"),
+        ({"terrain": float("nan")}, "finite"),
+        (
+            {
+                "terrain": 0,
+                "water": 0,
+                "bare": 0,
+                "green": 0,
+                "npv": 0,
+                "line_distance": 0,
+            },
+            "at least one positive",
+        ),
+        ({"mystery": 1}, "unknown config key"),
+    ],
+)
+def test_bridge_cost_weights_reject_invalid_values(weights, match) -> None:
+    from hydrofragments.config import ConfigError, HydroConfig
+
+    with pytest.raises(ConfigError, match=match):
+        HydroConfig.from_mapping(
+            minimal_config(riverscape={"bridge_cost_weights": weights})
+        )
