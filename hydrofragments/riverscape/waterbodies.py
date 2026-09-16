@@ -29,7 +29,9 @@ def _polygon_parts(geometry):
         return [geometry]
     if isinstance(geometry, MultiPolygon):
         return [part for part in geometry.geoms if not part.is_empty]
-    return []
+    raise TypeError(
+        f"expected Polygon or MultiPolygon, got {type(geometry).__name__}"
+    )
 
 
 def _merged_components(polygons: gpd.GeoDataFrame) -> list[tuple[int, object]]:
@@ -153,6 +155,8 @@ def classify_waterbodies(
             riverine |= body
         else:
             off_channel |= body
+
+    off_channel &= ~riverine
 
     frame = gpd.GeoDataFrame(
         rows,
