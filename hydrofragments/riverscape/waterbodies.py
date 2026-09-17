@@ -51,10 +51,16 @@ def _merged_components(polygons: gpd.GeoDataFrame) -> list[tuple[int, object]]:
         if left_root != right_root:
             parent[right_root] = left_root
 
-    for left in range(len(parts)):
-        for right in range(left + 1, len(parts)):
-            if parts[left][1].intersects(parts[right][1]):
-                union(left, right)
+    if parts:
+        from shapely import STRtree
+
+        geoms = [part for _, part in parts]
+        tree = STRtree(geoms)
+        for left, geom in enumerate(geoms):
+            for right in tree.query(geom, predicate="intersects"):
+                right = int(right)
+                if right > left:
+                    union(left, right)
     groups: dict[int, list[int]] = {}
     for index in range(len(parts)):
         groups.setdefault(find(index), []).append(index)

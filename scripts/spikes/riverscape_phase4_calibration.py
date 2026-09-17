@@ -468,7 +468,7 @@ def _render_findings(payload: Mapping[str, Any]) -> str:
         "## Method\n\n"
         "Reaches were stratified by UpstrDArea inside a connected local AHGF "
         "neighbourhood, buffered into a section AOI (corridor_max + "
-        "bridge_max_length halo) so corridor/channel/REM never run on the full "
+        "100 m halo) so corridor/channel/REM never run on the full "
         "catchment. One hundred 300-1800 m spans were sampled along AHGF "
         "linestrings on that section. Water/domain evidence was hidden on each "
         "span; routes retained terrain, FC, and line distance, with least-cost "

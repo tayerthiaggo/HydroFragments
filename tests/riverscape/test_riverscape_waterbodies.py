@@ -67,8 +67,9 @@ def test_one_ended_billabong_branch_is_off_channel() -> None:
 
 
 def test_compact_body_fails_elongation_even_when_crossed() -> None:
+    # 120×90 m body: span+contacts pass; only elongation < 2.0 rejects riverine.
     polygons = gpd.GeoDataFrame(
-        geometry=[box(90, 90, 210, 210)], crs="EPSG:3577"
+        geometry=[box(90, 105, 210, 195)], crs="EPSG:3577"
     )
     centreline = np.zeros((10, 10), bool)
     centreline[5, 0:10] = True
@@ -77,8 +78,11 @@ def test_compact_body_fails_elongation_even_when_crossed() -> None:
         polygons, centreline, transform=TRANSFORM, pixel_m=30.0
     )
 
-    assert result.polygons.iloc[0].elongation < 2.0
-    assert result.polygons.iloc[0].role == "off_channel"
+    row = result.polygons.iloc[0]
+    assert row.boundary_contacts >= 2
+    assert row.centreline_span_fraction >= 0.5
+    assert row.elongation < 2.0
+    assert row.role == "off_channel"
 
 
 def test_mixed_roles_clear_raster_overlap_riverine_wins() -> None:

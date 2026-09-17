@@ -10,7 +10,7 @@
 
 ## Method
 
-Reaches were stratified by UpstrDArea inside a connected local AHGF neighbourhood, buffered into a section AOI (corridor_max + small halo) so corridor/channel/REM never run on the full catchment. One hundred 300-1800 m spans were sampled along AHGF linestrings on that section. Water/domain evidence was hidden on each span; routes retained terrain, FC, and line distance, with least-cost MCP cropped to each gap window. Candidate score was median one-pixel-tolerance F1 minus twice off-channel crossing rate. Baseline was retained unless a candidate improved by at least 0.02 with at least 80% routable cases. Config defaults unchanged: selected candidate was baseline and cost-cap fell back to 1.0 (<80 high-F1 routes).
+Reaches were stratified by UpstrDArea inside a connected local AHGF neighbourhood, buffered into a section AOI (corridor_max + 100 m halo) so corridor/channel/REM never run on the full catchment. One hundred 300-1800 m spans were sampled along AHGF linestrings on that section. Water/domain evidence was hidden on each span; routes retained terrain, FC, and line distance, with least-cost MCP cropped to each gap window. Candidate score was median one-pixel-tolerance F1 minus twice off-channel crossing rate. Baseline was retained unless a candidate improved by at least 0.02 with at least 80% routable cases. Only 41/100 cases routed; without_bare scored higher (0.859 vs 0.795) but was excluded by the 80%-routable gate. Config defaults unchanged: selected candidate was baseline and cost-cap fell back to 1.0 (<80 high-F1 routes). Peak memory was not captured for this section-AOI run.
 
 ## Candidate results
 

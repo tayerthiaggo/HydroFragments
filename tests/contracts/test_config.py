@@ -479,6 +479,8 @@ def test_bridge_cost_weights_defaults_and_hash_shape() -> None:
     [
         ({"terrain": -1}, "non-negative"),
         ({"terrain": float("nan")}, "finite"),
+        ({"terrain": "abc"}, r"bridge_cost_weights\.terrain must be a number"),
+        ({"terrain": None}, r"bridge_cost_weights\.terrain must be a number"),
         (
             {
                 "terrain": 0,

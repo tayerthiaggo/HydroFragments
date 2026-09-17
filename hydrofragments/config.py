@@ -659,12 +659,16 @@ class HydroConfig:
                 for key in sorted(unknown_weight_keys)
             )
             raise ConfigError(f"unknown config key(s): {joined}")
-        bridge_cost_weights = BridgeCostWeights(
-            **{
-                key: float(weight_raw.get(key, getattr(weight_defaults, key)))
-                for key in weight_keys
-            }
-        )
+        parsed_weights: dict[str, float] = {}
+        for key in weight_keys:
+            raw_value = weight_raw.get(key, getattr(weight_defaults, key))
+            try:
+                parsed_weights[key] = float(raw_value)
+            except (TypeError, ValueError) as error:
+                raise ConfigError(
+                    f"riverscape.bridge_cost_weights.{key} must be a number"
+                ) from error
+        bridge_cost_weights = BridgeCostWeights(**parsed_weights)
         weight_values = tuple(
             getattr(bridge_cost_weights, key) for key in sorted(weight_keys)
         )
