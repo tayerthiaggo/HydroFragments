@@ -1,7 +1,7 @@
 # Riverscape Zoning Phase 5: Riverine vs Non-Riverine Landform
 
 **Date:** 2026-09-17  
-**Status:** Draft for review  
+**Status:** Approved  
 
 **Parent spec:** `docs/superpowers/specs/2026-09-14-riverscape-zoning-design.md`  
 **Prior phase design:** `docs/superpowers/specs/2026-09-15-riverscape-phase4-channel-bridging-design.md`  
