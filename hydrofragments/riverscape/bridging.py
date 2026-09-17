@@ -390,6 +390,45 @@ def _path_length(path: Sequence[tuple[int, int]], pixel_m: float) -> float:
     )
 
 
+def _gap_routing_window(
+    upstream: tuple[int, int],
+    downstream: tuple[int, int],
+    shape: tuple[int, int],
+    *,
+    pixel_m: float,
+    bridge_max_length_m: float,
+    paint_radius_m: float = 0.0,
+) -> tuple[slice, slice, tuple[int, int], tuple[int, int]]:
+    """Crop MCP to the gap bbox plus a halo that contains any accepted path.
+
+    Any route with length <= bridge_max_length_m lies inside the ellipse with
+    foci at the anchors and major axis equal to that length, which is contained
+    in the axis-aligned box expanded by bridge_max_length_m around the anchors.
+    An extra paint-radius pad keeps disc painting inside the same crop for
+    diagnostics; painting itself still targets the full raster.
+    """
+    if pixel_m <= 0.0:
+        raise ValueError("pixel_m must be positive")
+    rows, cols = shape
+    pad = (
+        int(np.ceil(bridge_max_length_m / pixel_m))
+        + int(np.ceil(max(paint_radius_m, 0.0) / pixel_m))
+        + 1
+    )
+    r0, c0 = upstream
+    r1, c1 = downstream
+    r_min = max(0, min(r0, r1) - pad)
+    r_max = min(rows, max(r0, r1) + pad + 1)
+    c_min = max(0, min(c0, c1) - pad)
+    c_max = min(cols, max(c0, c1) + pad + 1)
+    return (
+        slice(r_min, r_max),
+        slice(c_min, c_max),
+        (r0 - r_min, c0 - c_min),
+        (r1 - r_min, c1 - c_min),
+    )
+
+
 def _paint_disc(mask: np.ndarray, rc: tuple[int, int], radius_px: float) -> None:
     row, col = rc
     radius = max(float(radius_px), 0.5)
@@ -439,36 +478,65 @@ def bridge_gaps(
     observed = np.asarray(observed_channel, bool)
     if observed.shape != np.shape(cost_inputs.rem):
         raise ValueError("observed_channel and cost inputs must share shape")
-    base_cost = build_cost_surface(
-        cost_inputs,
-        weights=weights,
-        bridge_rem_max_m=bridge_rem_max_m,
-        trough_depth_m=trough_depth_m,
-    )
     bridged = np.zeros(observed.shape, bool)
     rows: list[dict[str, Any]] = []
     unbridged: list[UnbridgedGap] = []
     protected = np.asarray(cost_inputs.domain, bool) & ~observed
+    corridor_mask = np.asarray(cost_inputs.corridor_mask, bool)
 
     for gap in gaps:
         if gap.straight_length_m > bridge_max_length_m:
             unbridged.append(UnbridgedGap(gap, "straight_length_exceeds_max"))
             continue
-        cost = base_cost.copy()
-        cost[protected] = np.inf
-        cost[gap.upstream_anchor] = base_cost[gap.upstream_anchor]
-        cost[gap.downstream_anchor] = base_cost[gap.downstream_anchor]
+        # Never run MCP (or allocate a full-raster cost cube) on the catchment:
+        # crop inputs to gap + length halo so local channel reconstruction stays local.
+        paint_radius_m = max(gap.upstream_width_m, gap.downstream_width_m)
+        row_sl, col_sl, local_up, local_down = _gap_routing_window(
+            gap.upstream_anchor,
+            gap.downstream_anchor,
+            observed.shape,
+            pixel_m=pixel_m,
+            bridge_max_length_m=bridge_max_length_m,
+            paint_radius_m=paint_radius_m,
+        )
+        window_inputs = BridgeCostInputs(
+            rem=np.asarray(cost_inputs.rem[row_sl, col_sl]),
+            trough_depth=np.asarray(cost_inputs.trough_depth[row_sl, col_sl]),
+            frequency=np.asarray(cost_inputs.frequency[row_sl, col_sl]),
+            bare_fraction=np.asarray(cost_inputs.bare_fraction[row_sl, col_sl]),
+            green_pct=np.asarray(cost_inputs.green_pct[row_sl, col_sl]),
+            npv_pct=np.asarray(cost_inputs.npv_pct[row_sl, col_sl]),
+            line_distance_m=np.asarray(cost_inputs.line_distance_m[row_sl, col_sl]),
+            corridor_width_m=np.asarray(cost_inputs.corridor_width_m[row_sl, col_sl]),
+            corridor_mask=corridor_mask[row_sl, col_sl],
+            domain=np.asarray(cost_inputs.domain[row_sl, col_sl]),
+            off_channel_mask=np.asarray(cost_inputs.off_channel_mask[row_sl, col_sl]),
+        )
+        cost = build_cost_surface(
+            window_inputs,
+            weights=weights,
+            bridge_rem_max_m=bridge_rem_max_m,
+            trough_depth_m=trough_depth_m,
+        )
+        # Same as full-raster path: apply domain protection, then restore anchors
+        # from the unprotected-at-this-stage window cost.
+        anchor_up_cost = cost[local_up]
+        anchor_down_cost = cost[local_down]
+        cost[protected[row_sl, col_sl]] = np.inf
+        cost[local_up] = anchor_up_cost
+        cost[local_down] = anchor_down_cost
         mcp = MCP_Geometric(
             cost, fully_connected=True, sampling=(pixel_m, pixel_m)
         )
-        cumulative, _ = mcp.find_costs(
-            [gap.upstream_anchor], [gap.downstream_anchor]
-        )
-        total_cost = float(cumulative[gap.downstream_anchor])
+        cumulative, _ = mcp.find_costs([local_up], [local_down])
+        total_cost = float(cumulative[local_down])
         if not np.isfinite(total_cost):
             unbridged.append(UnbridgedGap(gap, "no_finite_path"))
             continue
-        path = [tuple(point) for point in mcp.traceback(gap.downstream_anchor)]
+        path = [
+            (int(point[0] + row_sl.start), int(point[1] + col_sl.start))
+            for point in mcp.traceback(local_down)
+        ]
         length_m = _path_length(path, pixel_m)
         if length_m > bridge_max_length_m:
             unbridged.append(UnbridgedGap(gap, "path_length_exceeds_max"))

@@ -11,6 +11,7 @@ from hydrofragments.config import BridgeCostWeights
 from hydrofragments.riverscape.bridging import (
     BridgeCostInputs,
     Gap,
+    _gap_routing_window,
     _path_length,
     bridge_gaps,
     build_cost_surface,
@@ -120,6 +121,45 @@ def test_width_is_interpolated_between_anchors() -> None:
     gap = Gap("gap-1", ("1",), (5, 2), (5, 12), 30.0, 90.0, 300.0)
     result = _bridge(gap, _inputs())
     assert result.bridged_mask[:, 11].sum() > result.bridged_mask[:, 3].sum()
+
+
+def test_gap_routing_window_pads_by_max_length() -> None:
+    row_sl, col_sl, local_up, local_down = _gap_routing_window(
+        (100, 50),
+        (100, 60),
+        (500, 500),
+        pixel_m=30.0,
+        bridge_max_length_m=300.0,
+        paint_radius_m=30.0,
+    )
+    # pad = ceil(300/30) + ceil(30/30) + 1 = 12
+    assert row_sl == slice(88, 113)
+    assert col_sl == slice(38, 73)
+    assert local_up == (12, 12)
+    assert local_down == (12, 22)
+
+
+def test_bridge_on_large_raster_uses_local_window() -> None:
+    """MCP must stay local: full-basin routing on a 2k grid would be very slow."""
+    import time
+
+    shape = (2000, 2000)
+    inputs = _inputs(shape)
+    gap = Gap(
+        "gap-large",
+        ("1",),
+        (1000, 990),
+        (1000, 1010),
+        30.0,
+        30.0,
+        600.0,
+    )
+    started = time.perf_counter()
+    result = _bridge(gap, inputs, bridge_max_length_m=2000.0)
+    elapsed = time.perf_counter() - started
+    assert result.unbridged == ()
+    assert result.bridged_mask[1000, 991:1010].all()
+    assert elapsed < 5.0
 
 
 def test_dangling_end_has_no_gap() -> None:
