@@ -1,7 +1,7 @@
 # Riverscape Zoning Phase 6b: Exports, Manifest, and Gating
 
 **Date:** 2026-09-18  
-**Status:** Draft for review  
+**Status:** Approved  
 **Parent spec:** `docs/superpowers/specs/2026-09-14-riverscape-zoning-design.md`  
 **Prior phase:** Phase 6a  
 `docs/superpowers/specs/2026-09-18-riverscape-phase6a-workflow-design.md`
