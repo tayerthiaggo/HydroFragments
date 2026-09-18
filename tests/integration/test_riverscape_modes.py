@@ -15,6 +15,7 @@ STAC/WFS or needs a real odc-geo GeoBox.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,10 @@ from hydrofragments import workflow as workflow_module
 from hydrofragments.config import HydroConfig
 from hydrofragments.io.riverscape_sources import RiverscapeSourceUnavailable
 from hydrofragments.models import HydroResult
+from hydrofragments.output.riverscape_export import RiverscapeExportBundle
+from hydrofragments.output.spatial import SpatialGrid
+from hydrofragments.riverscape.pipeline import LandformResult, with_grid
+from hydrofragments.riverscape.riverine import FloodplainEnvelope
 from hydrofragments.spatial.zones import ZoneResult, combine_zones
 from hydrofragments.workflow import (
     _default_config,
@@ -295,16 +300,91 @@ def _install_happy_path(monkeypatch, recorder: _Recorder, tmp_path: Path):
     return recorder
 
 
-def _install_riverscape(monkeypatch, recorder: _Recorder, *, raises=None):
-    def fake_zones_from_riverscape(stats, **kwargs):
+def _landform_result(landform=None, *, provenance=None, channel_bridges=None):
+    """Compact LandformResult for the stubbed riverscape path.
+
+    Mirrors ``tests/spatial/test_zones_from_riverscape.py::_landform_result``
+    (not importable across test packages -- ``tests/spatial`` has no
+    ``__init__.py``).
+    """
+    values = (
+        np.full(_SHAPE, 1, dtype=np.uint8)
+        if landform is None
+        else np.asarray(landform, dtype=np.uint8)
+    )
+    zeros = np.zeros(_SHAPE, dtype=np.uint8)
+    return LandformResult(
+        landform=values,
+        channel_source=np.full(_SHAPE, 1, dtype=np.uint8),
+        channel_confidence=np.full(_SHAPE, 3, dtype=np.uint8),
+        rule_id=zeros.copy(),
+        rem=np.zeros(_SHAPE, dtype=np.float32),
+        bridged_mask=np.zeros(_SHAPE, dtype=bool),
+        channel_bridges=channel_bridges,
+        unbridged=(),
+        envelope=FloodplainEnvelope(
+            a=2.0,
+            b=0.0,
+            n_bins=1,
+            bin_log_a_mid=(3.7,),
+            bin_rem_quantile=(2.0,),
+            bin_counts=(16,),
+            degraded_reasons=(),
+        ),
+        provenance=dict(provenance or _PROVENANCE),
+        degraded_reasons=(),
+    )
+
+
+_PROVENANCE = {
+    "channel_ruleset_version": "1.0.0",
+    "waterbody_ruleset_version": "1.0.0",
+    "riverine_ruleset_version": "1.0.0",
+    "dem_product": "ga_srtm_dem1sv1_0",
+    "dem_band": "elevation",
+    "fc_product": "ga_ls_fc_pc_cyear_3",
+    "fc_bands": ("bs_pc_50", "pv_pc_50", "npv_pc_50"),
+    "waterbodies_source": "dea_waterbodies",
+    "years": (2020, 2020),
+    "bridge_enabled": False,
+    "bare_threshold_pct": 30.0,
+    "envelope": {"a": 2.0, "b": 0.0, "n_bins": 1},
+    "pixel_counts": {
+        "domain": 16,
+        "water_seed": 16,
+        "observed_channel": 16,
+        "bridged_channel": 0,
+        "in_channel": 16,
+        "off_channel_riverine": 0,
+        "non_riverine": 0,
+    },
+    "bridge_counts_by_cause": {},
+    "unbridged_counts_by_reason": {},
+    "reach_counts": {"total": 1, "line_fallback": 0, "multithread": 0},
+}
+
+
+def _install_riverscape(monkeypatch, recorder: _Recorder, *, raises=None, landform=None):
+    def fake_zones_from_riverscape_with_landform(stats, **kwargs):
         recorder.riverscape_calls.append(kwargs)
         if raises is not None:
             raise raises
-        return _riverscape_zone_result()
+        grid = SpatialGrid.from_dataarray(stats.frequency, require_georeference=True)
+        zone_result = replace(_riverscape_zone_result(), grid=grid)
+        return zone_result, with_grid(landform or _landform_result(), grid)
 
     monkeypatch.setattr(
-        workflow_module, "zones_from_riverscape", fake_zones_from_riverscape
+        workflow_module,
+        "zones_from_riverscape_with_landform",
+        fake_zones_from_riverscape_with_landform,
     )
+
+
+def _resolve(*args, **kwargs):
+    """2-tuple view of the Phase 6b 3-tuple, for the mode-table cases that
+    do not care about the export bundle."""
+    zone_result, _bundle, reasons = _resolve_zone_result(*args, **kwargs)
+    return zone_result, reasons
 
 
 # --------------------------------------------------------------------------
@@ -326,7 +406,7 @@ def test_mode_off_uses_occurrence_zoning(monkeypatch) -> None:
     _install_riverscape(monkeypatch, recorder)
     timings: dict[str, float] = {}
 
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         _stats(),
         _drainage(),
         config=_config("off"),
@@ -343,7 +423,7 @@ def test_mode_off_uses_occurrence_zoning(monkeypatch) -> None:
 
 
 def test_mode_off_without_stats_returns_no_zones(monkeypatch) -> None:
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         None,
         _drainage(),
         config=_config("off"),
@@ -358,7 +438,7 @@ def test_mode_off_without_stats_returns_no_zones(monkeypatch) -> None:
 
 def test_auto_without_drainage_degrades_to_occurrence_with_a_reason(monkeypatch) -> None:
     """MUTANT 1: skipping the degrade reason must fail here."""
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         _stats(),
         None,
         config=_config("auto"),
@@ -381,7 +461,7 @@ def test_auto_with_drainage_uses_riverscape_zoning(monkeypatch) -> None:
     )
     timings: dict[str, float] = {}
 
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         _stats(),
         _drainage(),
         config=_config("auto"),
@@ -412,7 +492,7 @@ def test_auto_with_source_failure_degrades_to_occurrence_with_a_reason(monkeypat
     )
     timings: dict[str, float] = {}
 
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         _stats(),
         _drainage(),
         config=_config("auto"),
@@ -429,7 +509,7 @@ def test_auto_with_source_failure_degrades_to_occurrence_with_a_reason(monkeypat
 
 
 def test_auto_without_stats_reports_no_stats_and_no_zones() -> None:
-    zone_result, reasons = _resolve_zone_result(
+    zone_result, reasons = _resolve(
         None,
         _drainage(),
         config=_config("auto"),
@@ -492,7 +572,9 @@ def test_unexpected_exceptions_are_never_swallowed_as_a_degrade(monkeypatch) -> 
         raise KeyError("bug in the pipeline, not a missing source")
 
     monkeypatch.setattr(
-        workflow_module, "zones_from_riverscape", exploding_zones_from_riverscape
+        workflow_module,
+        "zones_from_riverscape_with_landform",
+        exploding_zones_from_riverscape,
     )
     monkeypatch.setattr(
         workflow_module, "_frequency_geobox", lambda frequency: SimpleNamespace()
@@ -793,6 +875,88 @@ def test_bad_drainage_schema_fails_before_acquisition(monkeypatch, tmp_path) -> 
 
     assert recorder.acquire_calls == []
     assert recorder.riverscape_calls == []
+
+
+# --------------------------------------------------------------------------
+# Phase 6b: the export bundle rides beside the ZoneResult (spec 6b section 3.2)
+# --------------------------------------------------------------------------
+
+
+def test_riverscape_path_produces_an_export_bundle(monkeypatch) -> None:
+    recorder = _Recorder()
+    _install_riverscape(monkeypatch, recorder)
+    monkeypatch.setattr(
+        workflow_module, "_frequency_geobox", lambda frequency: SimpleNamespace()
+    )
+
+    zone_result, bundle, reasons = _resolve_zone_result(
+        _stats(),
+        _drainage(),
+        config=_config("auto"),
+        years=(2020, 2020),
+        pixel_m=30.0,
+        timings={},
+    )
+
+    assert reasons == ()
+    assert isinstance(bundle, RiverscapeExportBundle)
+    assert bundle.zone_result is zone_result
+    assert bundle.landform.grid is not None
+    assert bundle.hydroperiod_classes.shape == _SHAPE
+
+
+def test_mode_off_produces_no_bundle(monkeypatch) -> None:
+    """MUTANT: building a bundle on the occurrence path would let a
+    ``mode="off"`` run write riverscape evidence rasters."""
+    zone_result, bundle, _reasons = _resolve_zone_result(
+        _stats(),
+        _drainage(),
+        config=_config("off"),
+        years=(2020, 2020),
+        pixel_m=30.0,
+        timings={},
+    )
+
+    assert zone_result is not None
+    assert bundle is None
+
+
+def test_auto_occurrence_fallback_produces_no_bundle(monkeypatch) -> None:
+    recorder = _Recorder()
+    _install_riverscape(
+        monkeypatch, recorder, raises=RiverscapeSourceUnavailable("DEM unavailable")
+    )
+    monkeypatch.setattr(
+        workflow_module, "_frequency_geobox", lambda frequency: SimpleNamespace()
+    )
+
+    zone_result, bundle, reasons = _resolve_zone_result(
+        _stats(),
+        _drainage(),
+        config=_config("auto"),
+        years=(2020, 2020),
+        pixel_m=30.0,
+        timings={},
+    )
+
+    assert zone_result is not None
+    assert zone_result.mode == "occurrence"
+    assert bundle is None
+    assert reasons == ("riverscape_source_unavailable",)
+
+
+def test_no_zone_result_rows_produce_no_bundle() -> None:
+    zone_result, bundle, reasons = _resolve_zone_result(
+        None,
+        _drainage(),
+        config=_config("auto"),
+        years=(2020, 2020),
+        pixel_m=30.0,
+        timings={},
+    )
+
+    assert (zone_result, bundle) == (None, None)
+    assert reasons == ("riverscape_no_stats",)
 
 
 def test_mode_off_still_validates_drainage_topology_early(monkeypatch, tmp_path) -> None:

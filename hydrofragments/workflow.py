@@ -122,9 +122,10 @@ from hydrofragments.spatial.connectivity_context import (
     _build_reach_label_raster,
     _raster_transform,
 )
+from hydrofragments.output.riverscape_export import RiverscapeExportBundle
 from hydrofragments.spatial.zones import (
     ZoneResult,
-    zones_from_riverscape,
+    zones_from_riverscape_with_landform,
     zones_from_wo_statistics,
 )
 
@@ -448,25 +449,30 @@ def _resolve_zone_result(
     years: tuple[int, int],
     pixel_m: float,
     timings: dict[str, float],
-) -> tuple["ZoneResult | None", tuple[str, ...]]:
-    """Resolve this run's ``ZoneResult`` per the Phase 6a mode table (spec section 6).
+) -> tuple["ZoneResult | None", "RiverscapeExportBundle | None", tuple[str, ...]]:
+    """Resolve this run's ``ZoneResult`` per the Phase 6a mode table (spec 6a section 6).
 
-    Returns ``(zone_result, degraded_reasons)``. The reasons are already
-    merged onto ``zone_result`` when there is one; they are also returned
-    separately so the ``stats is None`` case can still report WHY riverscape
-    zoning was skipped, which has no ``ZoneResult`` to carry it (Phase 6b
-    writes these into the manifest's ``zoning`` section).
+    Returns ``(zone_result, riverscape_bundle, degraded_reasons)``. The
+    reasons are already merged onto ``zone_result`` when there is one; they
+    are also returned separately so the ``stats is None`` case can still
+    report WHY riverscape zoning was skipped, which has no ``ZoneResult`` to
+    carry it (Phase 6b writes these into the manifest's ``zoning`` section).
+
+    ``riverscape_bundle`` is non-``None`` on exactly one branch: the
+    successful riverscape path. ``off``, both ``auto`` occurrence fallbacks,
+    and every ``None``-zones row return ``None`` (spec 6b section 3.1) --
+    an occurrence run must never be able to write riverscape evidence.
 
     | mode | drainage | sources | result |
     |---|---|---|---|
     | ``off`` | any | any | occurrence if stats, else ``None`` |
     | ``auto`` | missing | -- | occurrence + ``riverscape_no_drainage`` |
-    | ``auto`` | present | ok | ``zones_from_riverscape`` |
+    | ``auto`` | present | ok | riverscape zoning + bundle |
     | ``auto`` | present | source failure | occurrence + ``riverscape_source_unavailable`` |
     | ``auto`` | present | no stats | ``None`` + ``riverscape_no_stats`` |
     | ``required`` | missing | -- | raise |
     | ``required`` | present | source failure | propagate |
-    | ``required`` | present | ok | ``zones_from_riverscape`` |
+    | ``required`` | present | ok | riverscape zoning + bundle |
 
     Only ``RiverscapeSourceUnavailable`` and the declared no-drainage /
     no-stats cases map to the ``auto`` fallback. Every other exception
@@ -481,8 +487,8 @@ def _resolve_zone_result(
 
     if mode == "off":
         if stats is None:
-            return None, ()
-        return zones_from_wo_statistics(stats, config=config), ()
+            return None, None, ()
+        return zones_from_wo_statistics(stats, config=config), None, ()
 
     if drainage_gdf is None:
         if mode == "required":
@@ -490,10 +496,11 @@ def _resolve_zone_result(
                 "riverscape.mode='required' needs drainage lines; none were supplied"
             )
         if stats is None:
-            return None, ("riverscape_no_drainage",)
+            return None, None, ("riverscape_no_drainage",)
         reasons = ("riverscape_no_drainage",)
         return (
             _with_reasons(zones_from_wo_statistics(stats, config=config), reasons),
+            None,
             reasons,
         )
 
@@ -502,7 +509,7 @@ def _resolve_zone_result(
             raise RiverscapeSourceUnavailable(
                 "riverscape.mode='required' needs DEA WO statistics; none were available"
             )
-        return None, ("riverscape_no_stats",)
+        return None, None, ("riverscape_no_stats",)
 
     started = time.perf_counter()
     try:
@@ -512,7 +519,7 @@ def _resolve_zone_result(
         reach_labels, reach_keys, upstr_darea = _riverscape_reach_context(
             projected_drainage, stats.frequency, buffer_m=_RIVERSCAPE_REACH_BUFFER_M
         )
-        zone_result = zones_from_riverscape(
+        zone_result, landform_result = zones_from_riverscape_with_landform(
             stats,
             drainage=projected_drainage,
             config=config,
@@ -534,10 +541,12 @@ def _resolve_zone_result(
         reasons = ("riverscape_source_unavailable",)
         return (
             _with_reasons(zones_from_wo_statistics(stats, config=config), reasons),
+            None,
             reasons,
         )
     timings["riverscape"] = time.perf_counter() - started
-    return zone_result, tuple(zone_result.degraded_reasons)
+    bundle = RiverscapeExportBundle.from_zoning(zone_result, landform_result)
+    return zone_result, bundle, tuple(zone_result.degraded_reasons)
 
 
 def analyze_from_dea(
@@ -613,7 +622,7 @@ def analyze_from_dea(
     stats, footprint = _resolve_dea_planning(
         aoi_gdf, requested_years=requested_years, resolution=resolution, crs=dea_crs,
     )
-    zone_result, _riverscape_degraded_reasons = _resolve_zone_result(
+    zone_result, riverscape_bundle, riverscape_degraded_reasons = _resolve_zone_result(
         stats,
         drainage_gdf,
         config=resolved_config,
@@ -625,8 +634,9 @@ def analyze_from_dea(
     # finalize_analysis_bundle derives "total" as the sum of every other
     # key, so the riverscape branch's time is carved out of dea_planning
     # here instead of being counted twice.
-    # _riverscape_degraded_reasons is Phase 6b's input for the manifest's
-    # "zoning" section; 6a only has to produce it.
+    # riverscape_degraded_reasons feeds the manifest's "zoning" section when
+    # there is no ZoneResult to carry them; riverscape_bundle carries the
+    # landform science to finalize (Phase 6b spec section 3.7).
     timings["dea_planning"] = (
         time.perf_counter() - t0 - timings.get("riverscape", 0.0)
     )

@@ -24,6 +24,7 @@ from hydrofragments.spatial.zones import (
     ZoneResult,
     build_zones,
     zones_from_riverscape,
+    zones_from_riverscape_with_landform,
     zones_from_wo_statistics,
 )
 
@@ -45,5 +46,6 @@ __all__ = [
     "reach_wet_any_month",
     "validate_drainage_topology",
     "zones_from_riverscape",
+    "zones_from_riverscape_with_landform",
     "zones_from_wo_statistics",
 ]

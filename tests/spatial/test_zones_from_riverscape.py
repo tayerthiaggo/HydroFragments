@@ -24,7 +24,11 @@ from hydrofragments.config import HydroConfig
 from hydrofragments.riverscape.riverine import FloodplainEnvelope
 from hydrofragments.riverscape.pipeline import LandformResult
 from hydrofragments.spatial import zones as zones_module
-from hydrofragments.spatial.zones import zones_from_riverscape
+from hydrofragments.spatial.zones import (
+    ZoneResult,
+    zones_from_riverscape,
+    zones_from_riverscape_with_landform,
+)
 
 SHAPE = (3, 4)
 PIXEL_M = 30.0
@@ -328,3 +332,91 @@ def test_missing_years_without_stats_years_raises(monkeypatch) -> None:
             transform=TRANSFORM,
             years=None,
         )
+
+
+# --------------------------------------------------------------------------
+# Phase 6b: the landform-returning companion (spec 6b section 3.2)
+# --------------------------------------------------------------------------
+
+
+def _zones_with_landform(monkeypatch, result: LandformResult, **overrides):
+    calls = _install_build_landform(monkeypatch, result)
+    kwargs = {
+        "drainage": _drainage(),
+        "config": _config(),
+        "reach_labels": np.ones(SHAPE, dtype=np.int32),
+        "reach_keys": {1: "1"},
+        "upstr_darea": {1: 5000.0},
+        "geobox": SimpleNamespace(),
+        "transform": TRANSFORM,
+        "pixel_m": PIXEL_M,
+        "years": (2019, 2021),
+    }
+    stats = overrides.pop("stats", None) or _stats()
+    kwargs.update(overrides)
+    return zones_from_riverscape_with_landform(stats, **kwargs), calls
+
+
+def test_with_landform_returns_the_same_zone_result_as_the_wrapper(monkeypatch) -> None:
+    landform = [
+        [1, 2, 2, 0],
+        [2, 2, 2, 0],
+        [0, 0, 0, 0],
+    ]
+    (paired_zones, _paired_landform), _calls = _zones_with_landform(
+        monkeypatch, _landform_result(landform)
+    )
+    wrapper_zones, _calls_again = _zones(monkeypatch, _landform_result(landform))
+
+    np.testing.assert_array_equal(paired_zones.mask, wrapper_zones.mask)
+    np.testing.assert_array_equal(paired_zones.crosstab, wrapper_zones.crosstab)
+    assert paired_zones.mode == wrapper_zones.mode == "riverscape"
+    assert paired_zones.source == wrapper_zones.source
+
+
+def test_with_landform_attaches_the_zone_grid_to_the_landform_result(monkeypatch) -> None:
+    """MUTANT: returning the landform without calling ``with_grid`` leaves
+    ``grid=None``, and Task 3's evidence writer then has no grid to write
+    against (spec 6b section 2 row 11)."""
+    landform = [
+        [1, 2, 2, 0],
+        [2, 2, 2, 0],
+        [0, 0, 0, 0],
+    ]
+    (zone_result, landform_result), _calls = _zones_with_landform(
+        monkeypatch, _landform_result(landform)
+    )
+
+    assert zone_result.grid is not None
+    assert landform_result.grid is not None
+    assert landform_result.grid == zone_result.grid
+
+
+def test_with_landform_returns_the_landform_build_landform_produced(monkeypatch) -> None:
+    """MUTANT: discarding the landform again (returning a fresh/empty one)
+    loses ``provenance``, which Task 2's manifest section copies verbatim."""
+    landform = [
+        [1, 2, 2, 0],
+        [2, 2, 2, 0],
+        [0, 0, 0, 0],
+    ]
+    source = _landform_result(landform)
+    (_zone_result, landform_result), _calls = _zones_with_landform(monkeypatch, source)
+
+    assert landform_result.provenance == source.provenance
+    np.testing.assert_array_equal(landform_result.landform, source.landform)
+    np.testing.assert_array_equal(landform_result.rem, source.rem)
+
+
+def test_wrapper_still_returns_a_bare_zone_result(monkeypatch) -> None:
+    """API stability (spec 6b section 3.2): occurrence-shaped callers keep
+    a single return value."""
+    landform = [
+        [1, 2, 2, 0],
+        [2, 2, 2, 0],
+        [0, 0, 0, 0],
+    ]
+    result, _calls = _zones(monkeypatch, _landform_result(landform))
+
+    assert isinstance(result, ZoneResult)
+    assert not isinstance(result, tuple)

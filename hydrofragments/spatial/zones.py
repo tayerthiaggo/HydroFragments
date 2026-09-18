@@ -28,7 +28,7 @@ from hydrofragments.riverscape.codes import (
     LANDFORM_OUTSIDE,
 )
 from hydrofragments.riverscape.domain import wet_domain
-from hydrofragments.riverscape.pipeline import build_landform
+from hydrofragments.riverscape.pipeline import build_landform, with_grid
 
 if TYPE_CHECKING:
     from hydrofragments.io.dea import WoStatistics
@@ -206,7 +206,7 @@ def _resolve_years(stats: "WoStatistics", years: tuple[int, int] | None) -> tupl
     return (int(min(available)), int(max(available)))
 
 
-def zones_from_riverscape(
+def zones_from_riverscape_with_landform(
     stats: "WoStatistics",
     *,
     drainage: Any,
@@ -218,21 +218,22 @@ def zones_from_riverscape(
     transform: Any,
     pixel_m: float = 30.0,
     years: tuple[int, int] | None = None,
-) -> ZoneResult:
-    """Build a riverscape ``ZoneResult`` from DEA stats + drainage context.
+) -> tuple[ZoneResult, "LandformResult"]:
+    """Build a riverscape ``ZoneResult`` AND return the landform behind it.
 
-    Four steps, no new science (spec section 5): the observed-wet domain
-    comes from ``wet_domain`` over the same ``stats`` the occurrence path
-    reads; ``build_landform`` produces the landform layer; the hydroperiod
-    layer is classified over that same domain with the landform's bridged
-    mask supplied as ``unobserved_mask``; and ``combine_zones`` derives the
-    crosstab and legacy zone mask from the two layers.
+    Four steps, no new science (parent spec section 5): the observed-wet
+    domain comes from ``wet_domain`` over the same ``stats`` the occurrence
+    path reads; ``build_landform`` produces the landform layer; the
+    hydroperiod layer is classified over that same domain with the
+    landform's bridged mask supplied as ``unobserved_mask``; and
+    ``combine_zones`` derives the crosstab and legacy zone mask from the two
+    layers.
 
     Bridged pixels come out landform 1 / hydroperiod 4, so legacy Zone 1
     includes them. They lie strictly outside ``domain``
     (``bridging.bridge_gaps`` and ``riverscape.pipeline.build_landform`` both
-    enforce that), which is what lets ``classify_hydroperiod`` accept
-    them as ``unobserved_mask`` -- it rejects an overlap.
+    enforce that), which is what lets ``classify_hydroperiod`` accept them as
+    ``unobserved_mask`` -- it rejects an overlap.
 
     ``reach_labels``/``reach_keys``/``upstr_darea`` are built by the caller
     (``hydrofragments.riverscape`` must not import ``hydrofragments.spatial``,
@@ -240,6 +241,13 @@ def zones_from_riverscape(
     ``ZoneResult`` is stamped with ``source=stats.product``, matching
     ``zones_from_wo_statistics``'s convention, and carries a grid attached
     from ``stats.frequency``.
+
+    Phase 6b (spec 6b section 3.2) added the second return value. Phase 6a
+    dropped the ``LandformResult`` here, which forced any exporter to reload
+    DEM / Fractional Cover / Waterbodies to get it back. The same grid that
+    lands on the ``ZoneResult`` is attached to the ``LandformResult`` via
+    ``riverscape.pipeline.with_grid`` -- the documented seam for handing an
+    output-layer ``SpatialGrid`` back across the import boundary.
     """
     resolved_years = _resolve_years(stats, years)
     domain = wet_domain(stats, min_valid_obs=config.validity.min_valid_obs)
@@ -273,7 +281,42 @@ def zones_from_riverscape(
         source=stats.product,
         degraded_reasons=landform_result.degraded_reasons,
     )
-    return _attach_grid(result, stats.frequency)
+    zone_result = _attach_grid(result, stats.frequency)
+    return zone_result, with_grid(landform_result, zone_result.grid)
+
+
+def zones_from_riverscape(
+    stats: "WoStatistics",
+    *,
+    drainage: Any,
+    config: Any,
+    reach_labels: np.ndarray,
+    reach_keys: Any,
+    upstr_darea: Any,
+    geobox: Any,
+    transform: Any,
+    pixel_m: float = 30.0,
+    years: tuple[int, int] | None = None,
+) -> ZoneResult:
+    """Build a riverscape ``ZoneResult`` from DEA stats + drainage context.
+
+    Thin wrapper over :func:`zones_from_riverscape_with_landform`, kept for
+    API stability (spec 6b section 3.2): callers that only need zoning keep
+    a single return value. ``workflow`` uses the landform-returning form.
+    """
+    zone_result, _landform = zones_from_riverscape_with_landform(
+        stats,
+        drainage=drainage,
+        config=config,
+        reach_labels=reach_labels,
+        reach_keys=reach_keys,
+        upstr_darea=upstr_darea,
+        geobox=geobox,
+        transform=transform,
+        pixel_m=pixel_m,
+        years=years,
+    )
+    return zone_result
 
 
 def _validated_codes(values: np.ndarray, allowed: frozenset[int], name: str) -> np.ndarray:
@@ -343,5 +386,6 @@ __all__ = [
     "build_zones",
     "combine_zones",
     "zones_from_riverscape",
+    "zones_from_riverscape_with_landform",
     "zones_from_wo_statistics",
 ]
