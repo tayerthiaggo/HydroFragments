@@ -133,6 +133,47 @@ RASTER_PRODUCT_CONTRACTS: dict[str, RasterProductContract] = {
         units="eligible_hy_pairs",
         codebook="valid HY pairs wet in either year",
     ),
+    "riverscape_landform": RasterProductContract(
+        filename="landform.tif",
+        dtype=np.dtype(np.uint8),
+        nodata=np.uint8(0),
+        units="landform_code",
+        codebook="0=outside,1=in_channel,2=off_channel_riverine,3=non_riverine",
+    ),
+    "riverscape_hydroperiod": RasterProductContract(
+        filename="hydroperiod.tif",
+        dtype=np.dtype(np.uint8),
+        nodata=np.uint8(0),
+        units="hydroperiod_code",
+        codebook="0=outside,1=persistent,2=seasonal,3=marginal,4=unobserved",
+    ),
+    "riverscape_zone_crosstab": RasterProductContract(
+        filename="zone_crosstab.tif",
+        dtype=np.dtype(np.uint16),
+        nodata=np.uint16(0),
+        units="crosstab_code",
+        codebook="landform*10+hydroperiod; 0=outside",
+    ),
+    "riverscape_channel_source": RasterProductContract(
+        filename="channel_source.tif",
+        dtype=np.dtype(np.uint8),
+        nodata=_UINT8_NODATA,
+        units="channel_source_code",
+        codebook="0=not channel,1=observed,2=bridged,255=nodata",
+    ),
+    "riverscape_channel_confidence": RasterProductContract(
+        filename="channel_confidence.tif",
+        dtype=np.dtype(np.uint8),
+        nodata=_UINT8_NODATA,
+        units="confidence_score",
+        codebook="0-3 inside channel,255=not a channel pixel",
+    ),
+    "riverscape_rem": RasterProductContract(
+        filename="rem.tif",
+        dtype=np.dtype(np.float32),
+        nodata=_FLOAT32_NODATA,
+        units="metres",
+    ),
 }
 
 
@@ -907,6 +948,64 @@ def write_zones_geotiff(
     )
 
 
+#: On-disk order and band names for the ``riverscape_evidence`` product
+#: (spec 6b section 3.5). Pairs are ``(RASTER_PRODUCT_CONTRACTS key, array
+#: key)``; the array key doubles as the GeoTIFF band description.
+RIVERSCAPE_EVIDENCE_BANDS: tuple[tuple[str, str], ...] = (
+    ("riverscape_landform", "landform"),
+    ("riverscape_hydroperiod", "hydroperiod"),
+    ("riverscape_zone_crosstab", "zone_crosstab"),
+    ("riverscape_channel_source", "channel_source"),
+    ("riverscape_channel_confidence", "channel_confidence"),
+    ("riverscape_rem", "rem"),
+)
+
+
+def write_riverscape_evidence_geotiffs(
+    arrays: Mapping[str, np.ndarray],
+    destination: Path | str,
+    *,
+    grid: SpatialGrid,
+    metadata: Mapping[str, object],
+) -> dict[str, Path]:
+    """Write the six ``riverscape_evidence`` rasters onto one shared grid.
+
+    ``arrays`` is a plain mapping keyed by band name, not a
+    ``RiverscapeExportBundle`` -- this module stays free of the export
+    bundle type, and ``output.finalize`` owns the translation. Every band
+    goes through ``write_verified_geotiff``, so each file is reopened and
+    checked against its contract (dtype, CRS, transform, tiling,
+    compression, tags, values) before the atomic replace.
+    """
+    raster_dir = Path(destination)
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    preflight_raster_artifacts(
+        raster_dir,
+        filenames=[
+            RASTER_PRODUCT_CONTRACTS[key].filename
+            for key, _band in RIVERSCAPE_EVIDENCE_BANDS
+        ],
+    )
+
+    written: dict[str, Path] = {}
+    for key, band in RIVERSCAPE_EVIDENCE_BANDS:
+        contract = RASTER_PRODUCT_CONTRACTS[key]
+        values = np.asarray(arrays[band])
+        if values.shape != (grid.height, grid.width):
+            raise RasterExportError(
+                f"riverscape evidence band {band} does not align with the export grid"
+            )
+        written[key] = write_verified_geotiff(
+            bands=[values.astype(contract.dtype)],
+            destination=raster_dir / contract.filename,
+            grid=grid,
+            contract=contract,
+            band_descriptions=[band],
+            metadata={**metadata, "source_name": band},
+        )
+    return written
+
+
 def _require_h5netcdf() -> None:
     try:
         import h5netcdf  # noqa: F401
@@ -1191,7 +1290,9 @@ __all__ = [
     "validate_geotiff",
     "write_geotiff_from_dataarray",
     "write_persistence_rasters",
+    "RIVERSCAPE_EVIDENCE_BANDS",
     "write_verified_geotiff",
     "write_verified_netcdf",
     "write_zones_geotiff",
+    "write_riverscape_evidence_geotiffs",
 ]

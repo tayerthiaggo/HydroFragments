@@ -21,6 +21,7 @@ SpatialProduct = Literal[
     "temporal_rasters",
     "refuge_stability_rasters",
     "reach_profiles",
+    "riverscape_evidence",
 ]
 RasterFormat = Literal["geotiff", "netcdf"]
 
@@ -32,6 +33,7 @@ SPATIAL_PRODUCTS = frozenset(
         "temporal_rasters",
         "refuge_stability_rasters",
         "reach_profiles",
+        "riverscape_evidence",
     }
 )
 RASTER_FORMATS = frozenset({"geotiff", "netcdf"})
