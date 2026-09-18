@@ -8,7 +8,11 @@ import hashlib
 import json
 import mimetypes
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from hydrofragments.output.riverscape_export import RiverscapeExportBundle
+    from hydrofragments.spatial.zones import ZoneResult
 
 import numpy as np
 
@@ -258,6 +262,136 @@ def build_dea_provenance(
     return section
 
 
+def _finite_float(value: object, *, field: str) -> float:
+    number = float(value)
+    if not np.isfinite(number):
+        raise ManifestError(f"zoning.{field} must be finite")
+    return number
+
+
+def _bridged_length_m(bridges: Any) -> float:
+    """Total bridged centreline length in metres; 0 for an empty/absent frame.
+
+    ``LandformResult.channel_bridges`` is either
+    ``bridging._empty_bridge_frame``'s typed-empty GeoDataFrame or a frame
+    with one row per bridged gap. A stub may leave it ``None``.
+    """
+    if bridges is None or len(bridges) == 0:
+        return 0.0
+    return _finite_float(
+        np.asarray(bridges["length_m"], dtype=float).sum(),
+        field="bridged_length_m",
+    )
+
+
+def build_zoning_section(
+    zone_result: "ZoneResult | None",
+    bundle: "RiverscapeExportBundle | None",
+    *,
+    pixel_m: float,
+    configured_mode: str,
+    workflow_reasons: Sequence[str] = (),
+) -> dict[str, object]:
+    """Build the manifest's top-level ``zoning`` object (spec 6b section 3.3).
+
+    Three shapes, chosen by what actually exists this run:
+
+    1. ``bundle`` present -> the full riverscape record. Every key under
+       ``LandformResult.provenance`` is copied **verbatim** (spec section
+       3.3); the ruleset versions and source products are additionally
+       regrouped under ``ruleset_versions``/``sources`` exactly as the spec's
+       JSON shows. Area and length fields are derived here, not in the
+       pipeline, because ``pixel_m`` is an output-layer fact.
+    2. ``zone_result`` present without a bundle (occurrence zoning, or an
+       ``auto`` run that fell back) -> the thin subset: ``mode``,
+       ``domain_pixel_count``, ``domain_digest``, ``degraded_reasons``,
+       ``zone_source``. Riverscape-only keys are **omitted**, never emitted
+       as empty defaults, so a reader cannot mistake absent science for
+       degraded science.
+    3. Neither -> ``mode`` (the *configured* riverscape mode, since no
+       ``ZoneResult`` exists to report an actual one) plus
+       ``degraded_reasons`` from the workflow tuple. No domain digest is
+       fabricated.
+
+    ``degraded_reasons`` prefers ``ZoneResult.degraded_reasons`` whenever a
+    ``ZoneResult`` exists (spec section 2 row 5); ``workflow_reasons`` are
+    already merged onto it by ``workflow._with_reasons``, and are only read
+    directly in shape 3.
+
+    ``domain_digest`` reuses :func:`_hash_array` -- the same helper behind
+    ``dea_provenance.zone_mask_digest`` -- so the codebase has exactly one
+    mask-digest algorithm.
+    """
+    if zone_result is None:
+        return {
+            "mode": str(configured_mode),
+            "degraded_reasons": [str(reason) for reason in workflow_reasons],
+        }
+
+    section: dict[str, object] = {
+        "mode": str(zone_result.mode),
+        "degraded_reasons": [str(reason) for reason in zone_result.degraded_reasons],
+        "domain_digest": _hash_array(zone_result.mask),
+    }
+
+    if bundle is None:
+        section["domain_pixel_count"] = int(np.count_nonzero(zone_result.mask))
+        section["zone_source"] = str(zone_result.source)
+        return section
+
+    provenance = dict(bundle.landform.provenance)
+    pixel_counts = {
+        str(name): int(count)
+        for name, count in dict(provenance["pixel_counts"]).items()
+    }
+    cell_area_m2 = float(pixel_m) ** 2
+
+    section["domain_pixel_count"] = int(pixel_counts["domain"])
+    section["ruleset_versions"] = {
+        "channel": provenance["channel_ruleset_version"],
+        "waterbody": provenance["waterbody_ruleset_version"],
+        "riverine": provenance["riverine_ruleset_version"],
+    }
+    section["sources"] = {
+        "dem_product": provenance["dem_product"],
+        "dem_band": provenance["dem_band"],
+        "fc_product": provenance["fc_product"],
+        "fc_bands": [str(band) for band in provenance["fc_bands"]],
+        "waterbodies_source": provenance["waterbodies_source"],
+        "years": [int(year) for year in provenance["years"]],
+        "zone_source": str(zone_result.source),
+    }
+    section["bridge_enabled"] = bool(provenance["bridge_enabled"])
+    section["bare_threshold_pct"] = _finite_float(
+        provenance["bare_threshold_pct"], field="bare_threshold_pct"
+    )
+    envelope = dict(provenance["envelope"])
+    section["envelope"] = {
+        "a": _finite_float(envelope["a"], field="envelope.a"),
+        "b": _finite_float(envelope["b"], field="envelope.b"),
+        "n_bins": int(envelope["n_bins"]),
+    }
+    section["pixel_counts"] = pixel_counts
+    section["bridge_counts_by_cause"] = {
+        str(cause): int(count)
+        for cause, count in dict(provenance["bridge_counts_by_cause"]).items()
+    }
+    section["unbridged_counts_by_reason"] = {
+        str(reason): int(count)
+        for reason, count in dict(provenance["unbridged_counts_by_reason"]).items()
+    }
+    section["reach_counts"] = {
+        str(name): int(count)
+        for name, count in dict(provenance["reach_counts"]).items()
+    }
+    section["bridged_length_m"] = _bridged_length_m(bundle.landform.channel_bridges)
+    section["bridged_area_m2"] = (
+        float(np.count_nonzero(bundle.landform.bridged_mask)) * cell_area_m2
+    )
+    section["non_riverine_area_m2"] = float(pixel_counts["non_riverine"]) * cell_area_m2
+    return section
+
+
 def build_run_manifest(
     config: HydroConfig,
     *,
@@ -277,6 +411,7 @@ def build_run_manifest(
     dependency_versions: Mapping[str, str] | None = None,
     backend_capabilities: Mapping[str, object] | None = None,
     dea_provenance: Mapping[str, object] | None = None,
+    zoning: Mapping[str, object] | None = None,
     manifest_schema_version: str | None = None,
     peak_rss_bytes: int | None = None,
 ) -> dict[str, object]:
@@ -362,6 +497,8 @@ def build_run_manifest(
         manifest["peak_rss_bytes"] = int(peak_rss_bytes)
     if dea_provenance is not None:
         manifest["dea_provenance"] = dict(dea_provenance)
+    if zoning is not None:
+        manifest["zoning"] = dict(zoning)
     return manifest
 
 
@@ -542,6 +679,7 @@ __all__ = [
     "SUPPORTED_MANIFEST_SCHEMA_VERSIONS",
     "build_artifact_inventory",
     "build_dea_provenance",
+    "build_zoning_section",
     "build_run_manifest",
     "guess_media_type",
     "hash_directory_tree",
