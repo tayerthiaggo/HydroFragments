@@ -174,8 +174,9 @@ def test_analyze_output_identical_whether_or_not_riverscape_zones_were_computed(
     ``guards/scientific.py`` is untouched: persistence-by-zone stays
     refused, and landform 1 still rests on water evidence.
     """
-    config = _config(tmp_path / "with_riverscape_zones")
-    baseline_config = _config(tmp_path / "without_zones")
+    # Short output_dir names: Windows MAX_PATH breaks long pytest tmp roots.
+    config = _config(tmp_path / "rz")
+    baseline_config = _config(tmp_path / "nz")
 
     water = synthetic_cube.water.values.astype(bool)
     valid = synthetic_cube.valid_obs.values.astype(bool)
