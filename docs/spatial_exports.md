@@ -68,9 +68,12 @@ All products appropriate for a georeferenced cube with hydrological-year inputs:
         "temporal_rasters",
         "refuge_stability_rasters",
         "reach_profiles",
+        "riverscape_evidence",
     ],
 }
 ```
+
+> `riverscape_evidence` is the only product with a *workflow-mode* prerequisite: it requires an `analyze_from_dea` run whose `riverscape.mode` resolved to riverscape zoning. Requesting it on an occurrence run fails preflight.
 
 The deprecated `include_vectors: true` alias maps to `monthly_pools` for one schema cycle. Do not set both to conflicting values.
 
@@ -88,6 +91,13 @@ The deprecated `include_vectors: true` alias maps to `monthly_pools` for one sch
     zones
     reaches
     reach_wet_monthly
+    channel_bridges                 # riverscape_evidence only
+  rasters/landform.tif              # riverscape_evidence only
+  rasters/hydroperiod.tif           # riverscape_evidence only
+  rasters/zone_crosstab.tif         # riverscape_evidence only
+  rasters/channel_source.tif        # riverscape_evidence only
+  rasters/channel_confidence.tif    # riverscape_evidence only
+  rasters/rem.tif                   # riverscape_evidence only
   rasters/occurrence.tif
   rasters/valid_observation_count.tif
   rasters/refuge_mask.tif
@@ -176,9 +186,69 @@ Aggregate monthly metrics (AWRE, AWMSI) are **not** duplicated on every feature.
 
 **Paths:** `vectors/spatial.gpkg` layer `zones`, `rasters/zones.tif`
 
-Dissolved zone polygons with `zone_id`, `zone_name`, `area_km2`, `source`, and geometry. Raster uses uint8 zone codes (0 outside/no zone).
+| Column | Type | Notes |
+|---|---|---|
+| `zone_id` | int | 1–4 |
+| `zone_name` | str | Mode-keyed, see below |
+| `area_km2` | float | Dissolved polygon area |
+| `source` | str | Zone provenance (DEA product id, or `occurrence`) |
+| `mode` | str | `occurrence` or `riverscape` |
+| `landform` | int or null | Always null, see below |
+| `hydroperiod` | int or null | Always null, see below |
+| `geometry` | MultiPolygon | Analysis CRS |
+
+Zone names depend on the zoning mode:
+
+| Mode | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| `occurrence` | `channel_connected` | `persistent` | `seasonal` | `ephemeral` |
+| `riverscape` | `in_channel` | `persistent_off_channel` | `seasonal_floodplain` | `marginal_floodplain` |
+
+`landform` and `hydroperiod` are **always null** on this layer, in both modes. Zone polygons are dissolved per `zone_id`, and a dissolved riverscape Zone 1 mixes hydroperiod 4 (bridged, unobserved) with hydroperiods 1–3, so no single value is truthful at polygon granularity. The columns exist anyway so the GeoPackage schema does not change between modes. The authoritative per-pixel values ship as the `riverscape_evidence` rasters.
 
 **Prerequisites:** Explicit zone input (`AnalysisInputs.zones` or DEA workflow zone result). Unavailable from a cube-only `analyze()` call.
+
+### `riverscape_evidence`
+
+**Paths:** six GeoTIFFs under `rasters/`, plus the `channel_bridges` layer in `vectors/spatial.gpkg`.
+
+| File | dtype | nodata | Meaning |
+|---|---|---|---|
+| `landform.tif` | uint8 | 0 | 0=outside, 1=in_channel, 2=off_channel_riverine, 3=non_riverine |
+| `hydroperiod.tif` | uint8 | 0 | 0=outside, 1=persistent, 2=seasonal, 3=marginal, 4=unobserved (bridged) |
+| `zone_crosstab.tif` | uint16 | 0 | `landform * 10 + hydroperiod`; 0 outside |
+| `channel_source.tif` | uint8 | 255 | 0=not channel, 1=observed, 2=bridged |
+| `channel_confidence.tif` | uint8 | 255 | 0–3 inside channel; 255 outside channel |
+| `rem.tif` | float32 | NaN | Relative elevation above the channel, metres |
+
+All six share the `zones.tif` grid (same CRS, transform, and shape).
+
+**Prerequisites:** An `analyze_from_dea` run whose `riverscape.mode` resolved to riverscape zoning — that is, `auto` or `required` with drainage and the riverscape source products both available. `mode="off"`, and any `auto` run that fell back to occurrence zoning, cannot produce these layers, and requesting the product on such a run fails preflight with `SpatialProductUnavailable`. The product is **not** added by default: a run with `config=None` stays occurrence-only and writes no evidence.
+
+### `channel_bridges`
+
+**Path:** `vectors/spatial.gpkg` layer `channel_bridges`
+
+One LineString per reconstructed channel gap, in the analysis CRS (EPSG:3577).
+
+| Column | Type | Notes |
+|---|---|---|
+| `gap_id` | int | Gap identifier |
+| `reach_ids` | str | Comma-joined `HydroID`s the gap spans |
+| `length_m` | float | Bridge centreline length |
+| `cumulative_cost` | float | Least-cost path cost |
+| `cost_per_m` | float | `cumulative_cost / length_m` |
+| `upstream_width_m` | float | Corridor width at the upstream anchor |
+| `downstream_width_m` | float | Corridor width at the downstream anchor |
+| `bridge_confidence` | int | 1 or 2 |
+| `gap_cause` | str | `vegetated`, `narrow`, or `unobserved` |
+| `geometry` | LineString | Analysis CRS |
+
+**Prerequisites:** Same gate as `riverscape_evidence`, so bridges are never written without the rasters that explain them. When no gap was bridged the layer is still created, empty, with the full schema.
+
+### Manifest `zoning`
+
+Every run that produces a `ZoneResult` — or that has a recorded reason for producing none — writes a top-level `zoning` object into `run_manifest.json`. A riverscape run records the full science provenance (ruleset versions, source products, floodplain envelope, pixel counts, bridge and reach counts, bridged length/area, non-riverine area). An occurrence run records the thin subset: `mode`, `domain_pixel_count`, `domain_digest`, `degraded_reasons`, `zone_source`, with riverscape-only keys omitted rather than emitted empty. A run whose zoning returned nothing records only `mode` (the configured `riverscape.mode`) and `degraded_reasons`.
 
 ### `reach_profiles`
 

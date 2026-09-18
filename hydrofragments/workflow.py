@@ -590,6 +590,14 @@ def analyze_from_dea(
     ``"required"`` raises instead of degrading. Drainage is normalized and
     validated immediately after the AOI, before any acquisition, so a bad
     drainage schema never costs a WOfS read.
+
+    When ``config.output.spatial_products`` includes ``"riverscape_evidence"``
+    and the riverscape branch actually ran, the run also writes six evidence
+    rasters under ``rasters/`` and a ``channel_bridges`` layer into
+    ``vectors/spatial.gpkg`` (Phase 6b spec section 3.5/3.6). Requesting the
+    product on a run that cannot produce a bundle -- ``mode="off"``, or an
+    ``auto`` run that fell back to occurrence zoning -- fails preflight
+    rather than silently skipping the product.
     """
     timings: dict[str, float] = {}
 
@@ -708,6 +716,7 @@ def analyze_from_dea(
         pixel_size_m=resolution,
         git_sha=resolve_git_sha(),
         zone_result=zone_result,
+        riverscape_bundle=riverscape_bundle,
     )
     timings["metric_processing"] = time.perf_counter() - t0
 
@@ -745,6 +754,8 @@ def analyze_from_dea(
         inputs=inputs,
         pixel_size_m=resolution,
         zone_result=zone_result,
+        riverscape_bundle=riverscape_bundle,
+        zoning_reasons=riverscape_degraded_reasons,
         dea_provenance=dea_provenance,
         timings_seconds=timings,
     )

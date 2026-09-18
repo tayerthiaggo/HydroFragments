@@ -1116,6 +1116,7 @@ def _run_core_analysis(
     catchment_id: str | None = None,
     git_sha: str | None = None,
     zone_result: ZoneResult | None = None,
+    riverscape_bundle: Any = None,
 ) -> CoreAnalysisResult:
     """Compute metrics and optional spatial checkpoints without publishing."""
 
@@ -1175,6 +1176,7 @@ def _run_core_analysis(
             inputs=inputs,
             hydroyear_result=hydroyear_result,
             zone_result=zone_result or inputs.zones,
+            riverscape_bundle=riverscape_bundle,
         )
 
     available_dependencies = _available_dependencies(

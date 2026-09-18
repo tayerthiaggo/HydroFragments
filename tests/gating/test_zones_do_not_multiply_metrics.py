@@ -47,7 +47,7 @@ import pandas as pd
 
 from hydrofragments import HydroConfig, analyze
 from hydrofragments.config import ValidityConfig, ZonesConfig
-from hydrofragments.spatial.zones import build_zones
+from hydrofragments.spatial.zones import build_zones, combine_zones
 
 
 def _config(tmp_path):
@@ -153,6 +153,70 @@ def test_analyze_output_identical_whether_or_not_zones_were_computed(
     # Explicit row-count check per the brief's wording ("row count and
     # content are completely independent of whether a ZoneResult ... exists
     # or was computed alongside it").
+    assert len(result_with_zones.metrics_table) == len(
+        result_without_zones.metrics_table
+    )
+
+
+def test_analyze_output_identical_whether_or_not_riverscape_zones_were_computed(
+    synthetic_cube, tmp_path
+) -> None:
+    """Phase 6b spec section 4: riverscape zones do not multiply metrics.
+
+    Same invariant as the occurrence case above, extended to the landform x
+    hydroperiod path. ``combine_zones`` runs for real -- no stubbing -- over
+    layers derived from the very cube ``analyze()`` consumes, so the
+    ZoneResult is a genuine riverscape one (``mode == "riverscape"``, with a
+    crosstab). If a later phase ever wires zone-conditioned iteration into
+    ``analyze()`` or a caller of it, this fails the moment the riverscape
+    path makes metric output depend on zoning.
+
+    ``guards/scientific.py`` is untouched: persistence-by-zone stays
+    refused, and landform 1 still rests on water evidence.
+    """
+    config = _config(tmp_path / "with_riverscape_zones")
+    baseline_config = _config(tmp_path / "without_zones")
+
+    water = synthetic_cube.water.values.astype(bool)
+    valid = synthetic_cube.valid_obs.values.astype(bool)
+    valid_count = valid.sum(axis=0)
+    wet_count = (water & valid).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        occurrence_pct = np.where(valid_count > 0, 100.0 * wet_count / valid_count, np.nan)
+
+    # Landform: a synthetic in-channel column, off-channel riverine over the
+    # rest of the observed extent, 0 outside. Hydroperiod follows the same
+    # thresholds the occurrence path uses, so the two branches describe the
+    # same water.
+    observed = np.isfinite(occurrence_pct) & water.any(axis=0)
+    landform = np.zeros(observed.shape, dtype=np.uint8)
+    landform[observed] = 2
+    landform[observed & (np.arange(observed.shape[1])[None, :] == 0)] = 1
+
+    hydroperiod = np.zeros(observed.shape, dtype=np.uint8)
+    frequency = np.where(np.isfinite(occurrence_pct), occurrence_pct, 0.0)
+    hydroperiod[observed & (frequency > 50.0)] = 1
+    hydroperiod[observed & (frequency >= 10.0) & (frequency <= 50.0)] = 2
+    hydroperiod[observed & (frequency < 10.0)] = 3
+
+    zone_result = combine_zones(landform, hydroperiod, source="synthetic")
+
+    # Riverscape zoning genuinely happened and produced a real crosstab.
+    assert zone_result.mode == "riverscape"
+    assert zone_result.crosstab is not None
+    assert zone_result.mask.shape == water.shape[1:]
+    assert set(np.unique(zone_result.mask)) <= {0, 1, 2, 3, 4}
+
+    result_with_zones = analyze(
+        synthetic_cube, aoi_id="demo", config=config, pixel_size_m=30.0
+    )
+    result_without_zones = analyze(
+        synthetic_cube, aoi_id="demo", config=baseline_config, pixel_size_m=30.0
+    )
+
+    _assert_frames_identical(
+        result_with_zones.metrics_table, result_without_zones.metrics_table
+    )
     assert len(result_with_zones.metrics_table) == len(
         result_without_zones.metrics_table
     )
