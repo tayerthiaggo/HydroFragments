@@ -505,7 +505,12 @@ def build_landform(
     if not np.isfinite(pixel_m) or pixel_m <= 0:
         raise ValueError("pixel_m must be finite and positive")
     validate_drainage_columns(drainage)
-    if hasattr(geobox, "crs") and geobox.crs is not None and drainage.crs is not None:
+    if hasattr(geobox, "crs") and geobox.crs is not None:
+        if drainage.crs is None:
+            raise ValueError(
+                "drainage must have a CRS matching the zoning grid; "
+                "reproject drainage before calling build_landform"
+            )
         import pyproj
 
         drainage_crs = pyproj.CRS.from_user_input(drainage.crs)

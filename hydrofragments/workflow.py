@@ -359,8 +359,15 @@ def _project_drainage_to_frequency_grid(drainage_gdf: Any, frequency: Any) -> An
     import pyproj
 
     grid_crs = frequency.rio.crs
-    if drainage_gdf.crs is None or grid_crs is None:
-        return drainage_gdf
+    if drainage_gdf.crs is None:
+        raise ValueError(
+            "drainage must have a CRS before riverscape projection; "
+            "validate_drainage_topology requires a non-None CRS"
+        )
+    if grid_crs is None:
+        raise ValueError(
+            "frequency grid has no CRS; cannot project drainage for riverscape"
+        )
     drainage_crs = pyproj.CRS.from_user_input(drainage_gdf.crs)
     target_crs = pyproj.CRS.from_user_input(grid_crs)
     if drainage_crs.equals(target_crs):
