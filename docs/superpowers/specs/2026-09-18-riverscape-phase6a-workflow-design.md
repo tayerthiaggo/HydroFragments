@@ -1,7 +1,7 @@
 # Riverscape Zoning Phase 6a: Landform Pipeline and Workflow Modes
 
 **Date:** 2026-09-18  
-**Status:** Draft for review  
+**Status:** Approved  
 **Parent spec:** `docs/superpowers/specs/2026-09-14-riverscape-zoning-design.md`  
 **Prior phases:** Phase 4 design/findings; Phase 5  
 `docs/superpowers/specs/2026-09-17-riverscape-phase5-riverine-design.md`
