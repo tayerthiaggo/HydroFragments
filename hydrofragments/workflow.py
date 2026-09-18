@@ -39,11 +39,13 @@ import importlib.metadata
 import os
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import ndimage
 
 import hydroseason
 import hydroseason._io_dea_stats  # noqa: F401 -- accessed as module attrs below
@@ -104,16 +106,27 @@ from hydrofragments.api import _run_core_analysis, open_water_cube
 from hydrofragments.config import HydroConfig
 from hydrofragments.io.cache_footprints import open_verified_cache_footprints
 from hydrofragments.io.dea import open_wo_statistics_for_zoning
+from hydrofragments.io.riverscape_sources import RiverscapeSourceUnavailable
 from hydrofragments.metrics import ApsecRecord
 from hydrofragments.models import AnalysisInputs, HydroResult
 from hydrofragments.output.finalize import finalize_analysis_bundle
 from hydrofragments.output.manifest import build_dea_provenance
+from hydrofragments.riverscape.pipeline import validate_drainage_columns
 from hydrofragments.spatial import (
     SpatialContext,
     create_channel_context,
     reach_monthly_wet_profile,
+    validate_drainage_topology,
 )
-from hydrofragments.spatial.zones import zones_from_wo_statistics
+from hydrofragments.spatial.connectivity_context import (
+    _build_reach_label_raster,
+    _raster_transform,
+)
+from hydrofragments.spatial.zones import (
+    ZoneResult,
+    zones_from_riverscape,
+    zones_from_wo_statistics,
+)
 
 
 def _default_config(*, output_dir: str | Path) -> HydroConfig:
@@ -128,6 +141,16 @@ def _default_config(*, output_dir: str | Path) -> HydroConfig:
     ``metric_profiles`` is left at ``HydroConfig``'s own default
     (``("all_available",)``, W4.1): every runtime-wired metric whose
     dependencies this run's inputs actually supply.
+
+    ``riverscape.mode`` is pinned to ``"off"`` here, deliberately diverging
+    from :class:`~hydrofragments.config.RiverscapeConfig`'s own ``"auto"``
+    default. This is the minimal config built when a caller passes
+    ``config=None``; it configures no riverscape source products, so
+    leaving it at ``"auto"`` would make any run that supplies drainage
+    reach for DEM/Fractional Cover/Waterbodies over the network without the
+    caller ever asking for riverscape zoning. Opting in is an explicit act:
+    pass a ``HydroConfig`` with ``riverscape.mode`` set to ``"auto"`` or
+    ``"required"``.
     """
     return HydroConfig.from_mapping(
         {
@@ -138,6 +161,7 @@ def _default_config(*, output_dir: str | Path) -> HydroConfig:
                 "monthly_composite": "max_water",
                 "composite_owner": "upstream",
             },
+            "riverscape": {"mode": "off"},
             "output": {"output_dir": str(output_dir)},
         }
     )
@@ -272,7 +296,7 @@ def _dual_extent_inputs(
 
 
 def _channel_inputs(
-    drainage_source: Any,
+    drainage_gdf: Any,
     *,
     aoi_gdf: Any,
     aoi_id: str,
@@ -281,6 +305,11 @@ def _channel_inputs(
 ) -> tuple[SpatialContext, "np.ndarray", list[float]]:
     """Build a real channel :class:`SpatialContext` plus its monthly wet profile.
 
+    ``drainage_gdf`` is already normalized and topology-validated by
+    :func:`analyze_from_dea` (Phase 6a spec section 6 moves that validation
+    to right after AOI load, so a bad schema fails before any acquisition
+    or riverscape loader work); this function does not reload it.
+
     ``water``'s per-month, per-reach wetness comes from
     :func:`hydrofragments.spatial.reach_monthly_wet_profile` (the same
     skeleton-seeded-buffer method already used for ``wet_any_month`` gating,
@@ -288,7 +317,6 @@ def _channel_inputs(
     kernel is introduced here, only the existing one's already-computed
     intermediate is kept instead of discarded.
     """
-    drainage_gdf = _load_geometry(drainage_source)
     context = create_channel_context(
         aoi_id, aoi_gdf, drainage_gdf, drainage_id="workflow", target_crs=target_crs,
     )
@@ -297,6 +325,180 @@ def _channel_inputs(
     )
     segment_lengths_m = context.drainage.geometry.length.tolist()
     return context, wet_profile, segment_lengths_m
+
+
+#: Reach-buffer radius for the riverscape reach-label raster. Matches
+#: ``_DEFAULT_CHANNEL_BUFFER_M`` (two 30 m pixels), the same radius
+#: ``reach_monthly_wet_profile`` already uses to attribute water to a reach.
+#: Unclaimed pixels are filled by nearest-label below, so this value only
+#: decides which reach wins near a junction, not how far labels reach.
+_RIVERSCAPE_REACH_BUFFER_M = 60.0
+
+
+def _frequency_geobox(frequency: Any) -> Any:
+    """Return the odc-geo ``GeoBox`` for the zoning grid.
+
+    ``hydrofragments.io.riverscape_sources``'s loaders take a ``geobox=``
+    argument so every raster they return lands on this exact grid. The
+    ``.odc`` accessor is registered as an import side effect, so the import
+    is performed here rather than at module scope -- ``analyze_from_dea`` pays
+    for it only on a run that actually needs riverscape sources.
+    """
+    import odc.geo.xr  # noqa: F401 -- registers the .odc DataArray accessor
+
+    return frequency.odc.geobox
+
+
+def _riverscape_reach_context(
+    drainage_gdf: Any, frequency: Any, *, buffer_m: float
+) -> tuple["np.ndarray", dict[int, str], dict[int, float]]:
+    """Build the reach-label raster and the two label-keyed lookups riverscape needs.
+
+    ``hydrofragments.riverscape`` must not import ``hydrofragments.spatial``
+    (enforced by ``tests/riverscape/test_riverscape_import_boundary.py``), so
+    the label raster is built here, on this side of the boundary, from
+    ``spatial.connectivity_context``'s existing rasterizer rather than being
+    reimplemented inside the pipeline.
+
+    Two post-processing steps turn that raster into what the riverscape
+    kernels expect. Overlap pixels (``_build_reach_label_raster``'s ``-1``
+    sentinel, routine where adjacent reaches share an endpoint) are resolved
+    to their lowest-index claimant, because ``classify_channel`` rejects a
+    label it has no key for and a negative sentinel would simply be dropped
+    from the channel. Then every still-unclaimed pixel takes its nearest
+    labelled pixel's reach: both ``classify_channel``'s per-reach width
+    growth and ``riverine``'s floodplain envelope look up a reach for
+    pixels well outside any buffer, and an unlabelled pixel can never
+    become channel or floodplain.
+
+    ``reach_keys`` and ``upstr_darea`` are keyed by the integer LABEL value
+    (``index + 1``), not by ``HydroID`` -- ``riverine._lookup_area`` compares
+    its keys directly against ``reach_labels`` values.
+    """
+    y_coords = np.asarray(frequency["y"].values, dtype=float)
+    x_coords = np.asarray(frequency["x"].values, dtype=float)
+    labels, overlaps = _build_reach_label_raster(
+        drainage_gdf,
+        buffer_m=buffer_m,
+        transform=_raster_transform(y_coords, x_coords),
+        y_coords=y_coords,
+        x_coords=x_coords,
+    )
+    for (row, col), indices in overlaps.items():
+        labels[row, col] = min(indices) + 1
+    if labels.max() > 0 and (labels == 0).any():
+        _, nearest = ndimage.distance_transform_edt(labels == 0, return_indices=True)
+        labels = labels[nearest[0], nearest[1]]
+    reach_keys = {
+        index + 1: str(value) for index, value in enumerate(drainage_gdf["HydroID"])
+    }
+    upstr_darea = {
+        index + 1: float(value) for index, value in enumerate(drainage_gdf["UpstrDArea"])
+    }
+    return labels.astype(np.int32), reach_keys, upstr_darea
+
+
+def _with_reasons(result: "ZoneResult", reasons: tuple[str, ...]) -> "ZoneResult":
+    """Append ``reasons`` to ``result``'s degraded reasons, order-preserving."""
+    merged = tuple(dict.fromkeys(tuple(result.degraded_reasons) + tuple(reasons)))
+    return replace(result, degraded_reasons=merged)
+
+
+def _resolve_zone_result(
+    stats: Any,
+    drainage_gdf: Any,
+    *,
+    config: HydroConfig,
+    years: tuple[int, int],
+    pixel_m: float,
+    timings: dict[str, float],
+) -> tuple["ZoneResult | None", tuple[str, ...]]:
+    """Resolve this run's ``ZoneResult`` per the Phase 6a mode table (spec section 6).
+
+    Returns ``(zone_result, degraded_reasons)``. The reasons are already
+    merged onto ``zone_result`` when there is one; they are also returned
+    separately so the ``stats is None`` case can still report WHY riverscape
+    zoning was skipped, which has no ``ZoneResult`` to carry it (Phase 6b
+    writes these into the manifest's ``zoning`` section).
+
+    | mode | drainage | sources | result |
+    |---|---|---|---|
+    | ``off`` | any | any | occurrence if stats, else ``None`` |
+    | ``auto`` | missing | -- | occurrence + ``riverscape_no_drainage`` |
+    | ``auto`` | present | ok | ``zones_from_riverscape`` |
+    | ``auto`` | present | source failure | occurrence + ``riverscape_source_unavailable`` |
+    | ``auto`` | present | no stats | ``None`` + ``riverscape_no_stats`` |
+    | ``required`` | missing | -- | raise |
+    | ``required`` | present | source failure | propagate |
+    | ``required`` | present | ok | ``zones_from_riverscape`` |
+
+    Only ``RiverscapeSourceUnavailable`` and the declared no-drainage /
+    no-stats cases map to the ``auto`` fallback. Every other exception
+    propagates, so a genuine bug is never laundered into a degraded run.
+
+    ``timings["riverscape"]`` records the riverscape branch's own wall time
+    and is absent when the branch is skipped;
+    :func:`analyze_from_dea` subtracts it from ``dea_planning`` so the
+    manifest's phases stay disjoint.
+    """
+    mode = config.riverscape.mode
+
+    if mode == "off":
+        if stats is None:
+            return None, ()
+        return zones_from_wo_statistics(stats, config=config), ()
+
+    if drainage_gdf is None:
+        if mode == "required":
+            raise RiverscapeSourceUnavailable(
+                "riverscape.mode='required' needs drainage lines; none were supplied"
+            )
+        if stats is None:
+            return None, ("riverscape_no_drainage",)
+        reasons = ("riverscape_no_drainage",)
+        return (
+            _with_reasons(zones_from_wo_statistics(stats, config=config), reasons),
+            reasons,
+        )
+
+    if stats is None:
+        if mode == "required":
+            raise RiverscapeSourceUnavailable(
+                "riverscape.mode='required' needs DEA WO statistics; none were available"
+            )
+        return None, ("riverscape_no_stats",)
+
+    started = time.perf_counter()
+    try:
+        reach_labels, reach_keys, upstr_darea = _riverscape_reach_context(
+            drainage_gdf, stats.frequency, buffer_m=_RIVERSCAPE_REACH_BUFFER_M
+        )
+        zone_result = zones_from_riverscape(
+            stats,
+            drainage=drainage_gdf,
+            config=config,
+            reach_labels=reach_labels,
+            reach_keys=reach_keys,
+            upstr_darea=upstr_darea,
+            geobox=_frequency_geobox(stats.frequency),
+            transform=_raster_transform(
+                np.asarray(stats.frequency["y"].values, dtype=float),
+                np.asarray(stats.frequency["x"].values, dtype=float),
+            ),
+            pixel_m=pixel_m,
+            years=years,
+        )
+    except RiverscapeSourceUnavailable:
+        timings["riverscape"] = time.perf_counter() - started
+        if mode == "required":
+            raise
+        reasons = ("riverscape_source_unavailable",)
+        return (
+            _with_reasons(zones_from_wo_statistics(stats, config=config), reasons),
+            reasons,
+        )
+    timings["riverscape"] = time.perf_counter() - started
+    return zone_result, tuple(zone_result.degraded_reasons)
 
 
 def analyze_from_dea(
@@ -330,6 +532,16 @@ def analyze_from_dea(
     than failing the run. An invalid/tampered cache mask digest
     (``CacheFootprintVerificationError``) is never swallowed: a wrong
     denominator must never be silently accepted, so it propagates.
+
+    ``config.riverscape.mode`` selects the zoning path (Phase 6a spec
+    section 6). ``"off"`` keeps today's occurrence zoning. ``"auto"`` uses
+    riverscape zoning when drainage and the riverscape source products are
+    both available, and otherwise degrades to occurrence zoning with a
+    recorded reason (``riverscape_no_drainage`` /
+    ``riverscape_source_unavailable``) rather than failing the run.
+    ``"required"`` raises instead of degrading. Drainage is normalized and
+    validated immediately after the AOI, before any acquisition, so a bad
+    drainage schema never costs a WOfS read.
     """
     timings: dict[str, float] = {}
 
@@ -337,6 +549,20 @@ def analyze_from_dea(
         output_dir=Path(cache_dir).parent / "output"
     )
     aoi_gdf = _load_geometry(aoi)
+
+    # Parent spec section 7: validate drainage right after AOI load, before
+    # any acquisition or riverscape loader work. Topology is checked
+    # whatever the mode (channel metrics already need it); the extra
+    # riverscape column schema is checked only when riverscape zoning can
+    # actually run, so a caller with mode="off" is not forced to supply
+    # UpstrDArea.
+    drainage_gdf = None
+    if drainage is not None:
+        drainage_gdf = _load_geometry(drainage)
+        validate_drainage_topology(drainage_gdf)
+        if resolved_config.riverscape.mode != "off":
+            validate_drainage_columns(drainage_gdf)
+
     start = pd.Timestamp(start_date)
     end = pd.Timestamp(end_date)
     requested_years = list(range(start.year, end.year + 1))
@@ -348,10 +574,23 @@ def analyze_from_dea(
     stats, footprint = _resolve_dea_planning(
         aoi_gdf, requested_years=requested_years, resolution=resolution, crs=dea_crs,
     )
-    zone_result = None
-    if stats is not None:
-        zone_result = zones_from_wo_statistics(stats, config=resolved_config)
-    timings["dea_planning"] = time.perf_counter() - t0
+    zone_result, _riverscape_degraded_reasons = _resolve_zone_result(
+        stats,
+        drainage_gdf,
+        config=resolved_config,
+        years=(start.year, end.year),
+        pixel_m=resolution,
+        timings=timings,
+    )
+    # timings["riverscape"] is a sub-phase of planning, not an extra phase:
+    # finalize_analysis_bundle derives "total" as the sum of every other
+    # key, so the riverscape branch's time is carved out of dea_planning
+    # here instead of being counted twice.
+    # _riverscape_degraded_reasons is Phase 6b's input for the manifest's
+    # "zoning" section; 6a only has to produce it.
+    timings["dea_planning"] = (
+        time.perf_counter() - t0 - timings.get("riverscape", 0.0)
+    )
 
     # --- Phase 2/3: WOfS query + acquisition -----------------------------------
     t0 = time.perf_counter()
@@ -393,10 +632,10 @@ def analyze_from_dea(
     channel_context: SpatialContext | None = None
     channel_wet_profiles = None
     channel_segment_lengths_m = None
-    if drainage is not None:
+    if drainage_gdf is not None:
         channel_context, channel_wet_profiles, channel_segment_lengths_m = (
             _channel_inputs(
-                drainage,
+                drainage_gdf,
                 aoi_gdf=aoi_gdf,
                 aoi_id=aoi_id,
                 water=cube.water,
