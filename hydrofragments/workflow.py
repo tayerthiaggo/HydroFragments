@@ -375,10 +375,20 @@ def _riverscape_reach_context(
     (``index + 1``), not by ``HydroID`` -- ``riverine._lookup_area`` compares
     its keys directly against ``reach_labels`` values.
     """
+    import pyproj
+
+    grid_crs = frequency.rio.crs
+    projected_drainage = drainage_gdf
+    if drainage_gdf.crs is not None and grid_crs is not None:
+        drainage_crs = pyproj.CRS.from_user_input(drainage_gdf.crs)
+        target_crs = pyproj.CRS.from_user_input(grid_crs)
+        if not drainage_crs.equals(target_crs):
+            projected_drainage = drainage_gdf.to_crs(target_crs)
+
     y_coords = np.asarray(frequency["y"].values, dtype=float)
     x_coords = np.asarray(frequency["x"].values, dtype=float)
     labels, overlaps = _build_reach_label_raster(
-        drainage_gdf,
+        projected_drainage,
         buffer_m=buffer_m,
         transform=_raster_transform(y_coords, x_coords),
         y_coords=y_coords,
@@ -389,11 +399,18 @@ def _riverscape_reach_context(
     if labels.max() > 0 and (labels == 0).any():
         _, nearest = ndimage.distance_transform_edt(labels == 0, return_indices=True)
         labels = labels[nearest[0], nearest[1]]
+    if labels.max() == 0:
+        raise ValueError(
+            "reach label raster is empty after rasterizing drainage buffers "
+            "against the frequency grid; check drainage geometry, CRS, and "
+            "overlap with the WO statistics grid"
+        )
     reach_keys = {
-        index + 1: str(value) for index, value in enumerate(drainage_gdf["HydroID"])
+        index + 1: str(value) for index, value in enumerate(projected_drainage["HydroID"])
     }
     upstr_darea = {
-        index + 1: float(value) for index, value in enumerate(drainage_gdf["UpstrDArea"])
+        index + 1: float(value)
+        for index, value in enumerate(projected_drainage["UpstrDArea"])
     }
     return labels.astype(np.int32), reach_keys, upstr_darea
 

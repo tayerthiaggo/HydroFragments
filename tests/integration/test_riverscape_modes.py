@@ -34,6 +34,7 @@ from shapely.geometry import LineString, box
 from hydrofragments import workflow as workflow_module
 from hydrofragments.config import HydroConfig
 from hydrofragments.io.riverscape_sources import RiverscapeSourceUnavailable
+from hydrofragments.models import HydroResult
 from hydrofragments.spatial.zones import ZoneResult, combine_zones
 from hydrofragments.workflow import (
     _default_config,
@@ -61,6 +62,24 @@ def _drainage() -> "gpd.GeoDataFrame":
             "UpstrDArea": [5000.0],
         },
         geometry=[LineString([(10.0, 10.0), (100.0, 100.0)])],
+        crs=_CRS,
+    )
+
+
+def _drainage_two_reach() -> "gpd.GeoDataFrame":
+    """Two reaches sharing the endpoint (60, 60) so 60 m buffers overlap."""
+    return gpd.GeoDataFrame(
+        {
+            "HydroID": [1, 2],
+            "From_Node": [1, 2],
+            "To_Node": [2, 3],
+            "NextDownID": [2, -1],
+            "UpstrDArea": [3000.0, 5000.0],
+        },
+        geometry=[
+            LineString([(10.0, 10.0), (60.0, 60.0)]),
+            LineString([(60.0, 60.0), (110.0, 110.0)]),
+        ],
         crs=_CRS,
     )
 
@@ -482,6 +501,57 @@ def test_reach_context_labels_every_pixel_and_keys_by_label() -> None:
     assert upstr_darea == {1: 5000.0}
 
 
+def test_reach_context_reprojects_drainage_crs_to_frequency_grid() -> None:
+    """Drainage in EPSG:4326 must label the EPSG:3577 frequency grid."""
+    stats = _stats()
+    drainage_wgs84 = _drainage().to_crs("EPSG:4326")
+
+    labels, reach_keys, upstr_darea = _riverscape_reach_context(
+        drainage_wgs84, stats.frequency, buffer_m=60.0
+    )
+
+    assert labels.max() > 0
+    assert (labels == 1).all()
+    assert not (labels == -1).any()
+    assert reach_keys == {1: "1"}
+    assert upstr_darea == {1: 5000.0}
+
+
+def test_reach_context_raises_when_drainage_misses_grid() -> None:
+    stats = _stats()
+    far_away = gpd.GeoDataFrame(
+        {
+            "HydroID": [1],
+            "From_Node": [1],
+            "To_Node": [2],
+            "NextDownID": [-1],
+            "UpstrDArea": [5000.0],
+        },
+        geometry=[LineString([(10000.0, 10000.0), (20000.0, 20000.0)])],
+        crs=_CRS,
+    )
+
+    with pytest.raises(ValueError, match="reach label raster is empty"):
+        _riverscape_reach_context(far_away, stats.frequency, buffer_m=60.0)
+
+
+def test_reach_context_resolves_overlap_and_fills_unlabeled_pixels() -> None:
+    """Two-reach fixture exercises overlap resolution and nearest-fill."""
+    stats = _stats()
+    labels, reach_keys, upstr_darea = _riverscape_reach_context(
+        _drainage_two_reach(), stats.frequency, buffer_m=60.0
+    )
+
+    assert labels.shape == _SHAPE
+    assert labels.dtype == np.int32
+    assert not (labels == -1).any()
+    assert labels.max() > 0
+    assert (labels > 0).all()
+    assert set(np.unique(labels)) == {1, 2}
+    assert reach_keys == {1: "1", 2: "2"}
+    assert upstr_darea == {1: 3000.0, 2: 5000.0}
+
+
 # --------------------------------------------------------------------------
 # End-to-end wiring
 # --------------------------------------------------------------------------
@@ -509,10 +579,70 @@ def test_analyze_from_dea_auto_with_drainage_runs_the_riverscape_branch(
     timings = result.manifest["timings_seconds"]
     assert "riverscape" in timings
     assert timings["dea_planning"] >= 0.0
-    assert timings["total"] == pytest.approx(
-        sum(value for key, value in timings.items() if key != "total")
-    )
     assert (Path(result.output_dir) / "run_manifest.json").exists()
+
+
+def test_dea_planning_carves_out_riverscape_timing(monkeypatch, tmp_path) -> None:
+    """MUTANT D2: removing ``- timings.get("riverscape", 0.0)`` from the
+    ``dea_planning`` assignment in ``analyze_from_dea`` must fail here."""
+    recorder = _Recorder()
+    _install_happy_path(monkeypatch, recorder, tmp_path)
+    _install_riverscape(monkeypatch, recorder)
+
+    clock = {"t": 0.0}
+
+    def fake_perf_counter() -> float:
+        return clock["t"]
+
+    monkeypatch.setattr(workflow_module.time, "perf_counter", fake_perf_counter)
+
+    riverscape_seconds = 2.0
+    original_resolve = workflow_module._resolve_zone_result
+
+    def wrapped_resolve_zone_result(
+        stats, drainage_gdf, *, config, years, pixel_m, timings
+    ):
+        clock["t"] += riverscape_seconds
+        result = original_resolve(
+            stats,
+            drainage_gdf,
+            config=config,
+            years=years,
+            pixel_m=pixel_m,
+            timings=timings,
+        )
+        timings["riverscape"] = riverscape_seconds
+        return result
+
+    monkeypatch.setattr(
+        workflow_module, "_resolve_zone_result", wrapped_resolve_zone_result
+    )
+
+    def fake_finalize(_config, _core, **kwargs):
+        timings = dict(kwargs["timings_seconds"])
+        timings["total"] = sum(value for key, value in timings.items() if key != "total")
+        return HydroResult(
+            metrics_table=pd.DataFrame(),
+            manifest={"timings_seconds": timings},
+            output_dir=Path(_config.output.output_dir),
+            run_id="carveout-test",
+        )
+
+    monkeypatch.setattr(workflow_module, "finalize_analysis_bundle", fake_finalize)
+
+    result = analyze_from_dea(
+        _aoi(),
+        "2020-01-01",
+        "2020-04-30",
+        aoi_id="test_aoi",
+        drainage=_drainage(),
+        cache_dir=tmp_path / "wofs_cache",
+        config=_output_config("auto", tmp_path / "output_carveout"),
+    )
+
+    timings = result.manifest["timings_seconds"]
+    assert timings["riverscape"] == riverscape_seconds
+    assert timings["dea_planning"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_analyze_from_dea_required_without_drainage_fails_before_acquisition(
