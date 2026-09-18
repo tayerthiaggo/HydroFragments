@@ -420,6 +420,43 @@ def test_validate_drainage_columns_accepts_the_full_schema() -> None:
     assert validate_drainage_columns(_drainage()) is None
 
 
+def test_drainage_crs_must_match_geobox() -> None:
+    domain, frequency = _domain_and_frequency()
+    labels, reach_keys, upstr_darea = _reach_context()
+    from pyproj import Transformer
+
+    to_wgs84 = Transformer.from_crs(CRS, "EPSG:4326", always_xy=True)
+    x1, y1 = to_wgs84.transform(75.0, 195.0)
+    x2, y2 = to_wgs84.transform(525.0, 195.0)
+    drainage_wgs84 = gpd.GeoDataFrame(
+        {
+            "HydroID": [1],
+            "From_Node": [1],
+            "To_Node": [2],
+            "NextDownID": [-1],
+            "UpstrDArea": [5000.0],
+        },
+        geometry=[LineString([(x1, y1), (x2, y2)])],
+        crs="EPSG:4326",
+    )
+
+    with pytest.raises(ValueError, match="drainage CRS must match"):
+        build_landform(
+            domain,
+            frequency,
+            drainage_wgs84,
+            labels,
+            reach_keys,
+            upstr_darea,
+            geobox=SimpleNamespace(crs=CRS),
+            transform=TRANSFORM,
+            pixel_m=PIXEL_M,
+            cfg=_cfg(),
+            years=YEARS,
+            **_loaders(),
+        )
+
+
 def test_empty_drainage_is_rejected() -> None:
     with pytest.raises(ValueError, match="at least one line feature"):
         validate_drainage_columns(_drainage().iloc[0:0])

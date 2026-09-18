@@ -349,6 +349,25 @@ def _frequency_geobox(frequency: Any) -> Any:
     return frequency.odc.geobox
 
 
+def _project_drainage_to_frequency_grid(drainage_gdf: Any, frequency: Any) -> Any:
+    """Reproject drainage to the frequency grid CRS for riverscape consumers.
+
+    Both ``_riverscape_reach_context`` and ``zones_from_riverscape`` /
+    ``build_landform`` rasterize against the same metre-space grid, so the
+    caller must pass one shared projected frame to each.
+    """
+    import pyproj
+
+    grid_crs = frequency.rio.crs
+    if drainage_gdf.crs is None or grid_crs is None:
+        return drainage_gdf
+    drainage_crs = pyproj.CRS.from_user_input(drainage_gdf.crs)
+    target_crs = pyproj.CRS.from_user_input(grid_crs)
+    if drainage_crs.equals(target_crs):
+        return drainage_gdf
+    return drainage_gdf.to_crs(target_crs)
+
+
 def _riverscape_reach_context(
     drainage_gdf: Any, frequency: Any, *, buffer_m: float
 ) -> tuple["np.ndarray", dict[int, str], dict[int, float]]:
@@ -360,35 +379,28 @@ def _riverscape_reach_context(
     ``spatial.connectivity_context``'s existing rasterizer rather than being
     reimplemented inside the pipeline.
 
+    ``drainage_gdf`` must already be in ``frequency``'s CRS (see
+    ``_project_drainage_to_frequency_grid``); this helper does not reproject.
+
     Two post-processing steps turn that raster into what the riverscape
     kernels expect. Overlap pixels (``_build_reach_label_raster``'s ``-1``
     sentinel, routine where adjacent reaches share an endpoint) are resolved
     to their lowest-index claimant, because ``classify_channel`` rejects a
     label it has no key for and a negative sentinel would simply be dropped
     from the channel. Then every still-unclaimed pixel takes its nearest
-    labelled pixel's reach: both ``classify_channel``'s per-reach width
-    growth and ``riverine``'s floodplain envelope look up a reach for
-    pixels well outside any buffer, and an unlabelled pixel can never
-    become channel or floodplain.
+    labelled pixel's reach (unbounded nearest fill; Phase 8/6b may cap):
+    both ``classify_channel``'s per-reach width growth and ``riverine``'s
+    floodplain envelope look up a reach for pixels well outside any buffer,
+    and an unlabelled pixel can never become channel or floodplain.
 
     ``reach_keys`` and ``upstr_darea`` are keyed by the integer LABEL value
     (``index + 1``), not by ``HydroID`` -- ``riverine._lookup_area`` compares
     its keys directly against ``reach_labels`` values.
     """
-    import pyproj
-
-    grid_crs = frequency.rio.crs
-    projected_drainage = drainage_gdf
-    if drainage_gdf.crs is not None and grid_crs is not None:
-        drainage_crs = pyproj.CRS.from_user_input(drainage_gdf.crs)
-        target_crs = pyproj.CRS.from_user_input(grid_crs)
-        if not drainage_crs.equals(target_crs):
-            projected_drainage = drainage_gdf.to_crs(target_crs)
-
     y_coords = np.asarray(frequency["y"].values, dtype=float)
     x_coords = np.asarray(frequency["x"].values, dtype=float)
     labels, overlaps = _build_reach_label_raster(
-        projected_drainage,
+        drainage_gdf,
         buffer_m=buffer_m,
         transform=_raster_transform(y_coords, x_coords),
         y_coords=y_coords,
@@ -406,11 +418,11 @@ def _riverscape_reach_context(
             "overlap with the WO statistics grid"
         )
     reach_keys = {
-        index + 1: str(value) for index, value in enumerate(projected_drainage["HydroID"])
+        index + 1: str(value) for index, value in enumerate(drainage_gdf["HydroID"])
     }
     upstr_darea = {
         index + 1: float(value)
-        for index, value in enumerate(projected_drainage["UpstrDArea"])
+        for index, value in enumerate(drainage_gdf["UpstrDArea"])
     }
     return labels.astype(np.int32), reach_keys, upstr_darea
 
@@ -487,12 +499,15 @@ def _resolve_zone_result(
 
     started = time.perf_counter()
     try:
+        projected_drainage = _project_drainage_to_frequency_grid(
+            drainage_gdf, stats.frequency
+        )
         reach_labels, reach_keys, upstr_darea = _riverscape_reach_context(
-            drainage_gdf, stats.frequency, buffer_m=_RIVERSCAPE_REACH_BUFFER_M
+            projected_drainage, stats.frequency, buffer_m=_RIVERSCAPE_REACH_BUFFER_M
         )
         zone_result = zones_from_riverscape(
             stats,
-            drainage=drainage_gdf,
+            drainage=projected_drainage,
             config=config,
             reach_labels=reach_labels,
             reach_keys=reach_keys,

@@ -38,6 +38,7 @@ from hydrofragments.models import HydroResult
 from hydrofragments.spatial.zones import ZoneResult, combine_zones
 from hydrofragments.workflow import (
     _default_config,
+    _project_drainage_to_frequency_grid,
     _resolve_zone_result,
     _riverscape_reach_context,
     analyze_from_dea,
@@ -64,6 +65,32 @@ def _drainage() -> "gpd.GeoDataFrame":
         geometry=[LineString([(10.0, 10.0), (100.0, 100.0)])],
         crs=_CRS,
     )
+
+
+def _drainage_wgs84() -> "gpd.GeoDataFrame":
+    """Drainage in EPSG:4326 whose lon/lat only rasterize after reproject."""
+    from pyproj import Transformer
+
+    to_wgs84 = Transformer.from_crs(_CRS, "EPSG:4326", always_xy=True)
+    x1, y1 = to_wgs84.transform(10.0, 10.0)
+    x2, y2 = to_wgs84.transform(100.0, 100.0)
+    return gpd.GeoDataFrame(
+        {
+            "HydroID": [1],
+            "From_Node": [1],
+            "To_Node": [2],
+            "NextDownID": [-1],
+            "UpstrDArea": [5000.0],
+        },
+        geometry=[LineString([(x1, y1), (x2, y2)])],
+        crs="EPSG:4326",
+    )
+
+
+def _assert_crs_is_3577(crs) -> None:
+    import pyproj
+
+    assert pyproj.CRS.from_user_input(crs).to_epsg() == 3577
 
 
 def _drainage_two_reach() -> "gpd.GeoDataFrame":
@@ -501,13 +528,26 @@ def test_reach_context_labels_every_pixel_and_keys_by_label() -> None:
     assert upstr_darea == {1: 5000.0}
 
 
-def test_reach_context_reprojects_drainage_crs_to_frequency_grid() -> None:
-    """Drainage in EPSG:4326 must label the EPSG:3577 frequency grid."""
+def test_project_drainage_to_frequency_grid_reprojects_wgs84() -> None:
+    """Drainage in EPSG:4326 must land on the EPSG:3577 frequency grid."""
     stats = _stats()
-    drainage_wgs84 = _drainage().to_crs("EPSG:4326")
+    drainage_wgs84 = _drainage_wgs84()
+
+    projected = _project_drainage_to_frequency_grid(drainage_wgs84, stats.frequency)
+
+    _assert_crs_is_3577(projected.crs)
+    bounds = projected.total_bounds
+    assert bounds[0] >= 0.0
+    assert bounds[2] <= 120.0
+
+
+def test_reach_context_labels_projected_wgs84_drainage() -> None:
+    """Reach labels require metre-space drainage on the frequency grid."""
+    stats = _stats()
+    projected = _project_drainage_to_frequency_grid(_drainage_wgs84(), stats.frequency)
 
     labels, reach_keys, upstr_darea = _riverscape_reach_context(
-        drainage_wgs84, stats.frequency, buffer_m=60.0
+        projected, stats.frequency, buffer_m=60.0
     )
 
     assert labels.max() > 0
@@ -515,6 +555,75 @@ def test_reach_context_reprojects_drainage_crs_to_frequency_grid() -> None:
     assert not (labels == -1).any()
     assert reach_keys == {1: "1"}
     assert upstr_darea == {1: 5000.0}
+
+
+def test_resolve_zone_result_rejects_unreprojected_wgs84_at_build_landform(
+    monkeypatch,
+) -> None:
+    """MUTANT: skipping _project_drainage_to_frequency_grid must fail loudly."""
+    monkeypatch.setattr(
+        workflow_module,
+        "_project_drainage_to_frequency_grid",
+        lambda drainage_gdf, frequency: drainage_gdf,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "_frequency_geobox",
+        lambda frequency: SimpleNamespace(crs=_CRS),
+    )
+
+    with pytest.raises(ValueError, match="drainage CRS must match"):
+        _resolve_zone_result(
+            _stats(),
+            _drainage_wgs84(),
+            config=_config("auto"),
+            years=(2020, 2020),
+            pixel_m=30.0,
+            timings={},
+        )
+
+
+class _DrainageCaptured(Exception):
+    """Raised by the build_landform spy once drainage has been observed."""
+
+
+def test_resolve_zone_result_passes_projected_drainage_to_build_landform(
+    monkeypatch,
+) -> None:
+    """WGS84 drainage must reach build_landform in the frequency grid CRS."""
+    from hydrofragments.spatial import zones as zones_module
+
+    captured: list = []
+
+    def spy_build_landform(
+        domain, frequency, drainage, reach_labels, reach_keys, upstr_darea, **kwargs
+    ):
+        captured.append(drainage)
+        raise _DrainageCaptured()
+
+    monkeypatch.setattr(zones_module, "build_landform", spy_build_landform)
+    monkeypatch.setattr(
+        workflow_module,
+        "_frequency_geobox",
+        lambda frequency: SimpleNamespace(crs=_CRS),
+    )
+
+    with pytest.raises(_DrainageCaptured):
+        _resolve_zone_result(
+            _stats(),
+            _drainage_wgs84(),
+            config=_config("auto"),
+            years=(2020, 2020),
+            pixel_m=30.0,
+            timings={},
+        )
+
+    assert len(captured) == 1
+    drainage = captured[0]
+    _assert_crs_is_3577(drainage.crs)
+    bounds = drainage.total_bounds
+    assert bounds[0] >= 0.0
+    assert bounds[2] <= 120.0
 
 
 def test_reach_context_raises_when_drainage_misses_grid() -> None:
