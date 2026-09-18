@@ -19,6 +19,7 @@ from hydrofragments.hydroperiod.codes import (
     HYDROPERIOD_SEASONAL,
     HYDROPERIOD_UNOBSERVED,
 )
+from hydrofragments.hydroperiod.classify import classify_hydroperiod
 from hydrofragments.output.spatial import SpatialGrid
 from hydrofragments.riverscape.codes import (
     LANDFORM_CODES,
@@ -26,6 +27,8 @@ from hydrofragments.riverscape.codes import (
     LANDFORM_OFF_CHANNEL_RIVERINE,
     LANDFORM_OUTSIDE,
 )
+from hydrofragments.riverscape.domain import wet_domain
+from hydrofragments.riverscape.pipeline import build_landform
 
 if TYPE_CHECKING:
     from hydrofragments.io.dea import WoStatistics
@@ -184,6 +187,95 @@ def zones_from_wo_statistics(
     return _attach_grid(result, stats.frequency)
 
 
+def _resolve_years(stats: "WoStatistics", years: tuple[int, int] | None) -> tuple[int, int]:
+    """Resolve the inclusive ``(start_year, end_year)`` Fractional Cover window.
+
+    An explicit ``years`` always wins. Otherwise ``stats.years`` is used when
+    the statistics object carries it (spec section 3.3); ``WoStatistics`` does
+    not declare that field today, so a caller that omits both gets a
+    ``ValueError`` rather than a silently guessed window -- the FC stack's
+    year range is a scientific input, not a default.
+    """
+    if years is not None:
+        return (int(years[0]), int(years[1]))
+    available = getattr(stats, "years", None)
+    if not available:
+        raise ValueError(
+            "zones_from_riverscape requires years when stats carries no years"
+        )
+    return (int(min(available)), int(max(available)))
+
+
+def zones_from_riverscape(
+    stats: "WoStatistics",
+    *,
+    drainage: Any,
+    config: Any,
+    reach_labels: np.ndarray,
+    reach_keys: Any,
+    upstr_darea: Any,
+    geobox: Any,
+    transform: Any,
+    pixel_m: float = 30.0,
+    years: tuple[int, int] | None = None,
+) -> ZoneResult:
+    """Build a riverscape ``ZoneResult`` from DEA stats + drainage context.
+
+    Four steps, no new science (spec section 5): the observed-wet domain
+    comes from ``wet_domain`` over the same ``stats`` the occurrence path
+    reads; ``build_landform`` produces the landform layer; the hydroperiod
+    layer is classified over that same domain with the landform's bridged
+    mask supplied as ``unobserved_mask``; and ``combine_zones`` derives the
+    crosstab and legacy zone mask from the two layers.
+
+    Bridged pixels come out landform 1 / hydroperiod 4, so legacy Zone 1
+    includes them. They lie strictly outside ``domain``
+    (``bridging.bridge_gaps`` and ``riverscape.pipeline.build_landform`` both
+    enforce that), which is what lets ``classify_hydroperiod`` accept
+    them as ``unobserved_mask`` -- it rejects an overlap.
+
+    ``reach_labels``/``reach_keys``/``upstr_darea`` are built by the caller
+    (``hydrofragments.riverscape`` must not import ``hydrofragments.spatial``,
+    so it cannot build them itself) and forwarded unchanged. The returned
+    ``ZoneResult`` is stamped with ``source=stats.product``, matching
+    ``zones_from_wo_statistics``'s convention, and carries a grid attached
+    from ``stats.frequency``.
+    """
+    resolved_years = _resolve_years(stats, years)
+    domain = wet_domain(stats, min_valid_obs=config.validity.min_valid_obs)
+    frequency = np.asarray(stats.frequency, dtype=float)
+
+    landform_result = build_landform(
+        domain,
+        frequency,
+        drainage,
+        reach_labels,
+        reach_keys,
+        upstr_darea,
+        geobox=geobox,
+        transform=transform,
+        pixel_m=pixel_m,
+        cfg=config.riverscape,
+        years=resolved_years,
+    )
+
+    hydroperiod = classify_hydroperiod(
+        frequency,
+        domain,
+        t_persist=config.zones.t_persist,
+        t_season=config.zones.t_season,
+        unobserved_mask=landform_result.bridged_mask,
+    )
+
+    result = combine_zones(
+        landform_result.landform,
+        hydroperiod.classes,
+        source=stats.product,
+        degraded_reasons=landform_result.degraded_reasons,
+    )
+    return _attach_grid(result, stats.frequency)
+
+
 def _validated_codes(values: np.ndarray, allowed: frozenset[int], name: str) -> np.ndarray:
     invalid = sorted(set(np.unique(values).tolist()) - set(allowed))
     if invalid:
@@ -246,4 +338,10 @@ def combine_zones(
     )
 
 
-__all__ = ["ZoneResult", "build_zones", "combine_zones", "zones_from_wo_statistics"]
+__all__ = [
+    "ZoneResult",
+    "build_zones",
+    "combine_zones",
+    "zones_from_riverscape",
+    "zones_from_wo_statistics",
+]
